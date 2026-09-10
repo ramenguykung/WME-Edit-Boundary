@@ -18,6 +18,7 @@ models.set('segments', new Map([[1,original]]));
 let unsaved = location.search.includes('dirty')?1:0, redo = 0, savingMode = 'IDLE', edits=0, rejectSavedWrites=false;
 const newIds = new Set(), deletedIds = new Set();
 const features = new Map();
+let layerStyle = {fillColor:'#12aabb',fillOpacity:.13,strokeColor:'#12aabb',strokeWidth:2};
 const originalPut=IDBObjectStore.prototype.put;
 IDBObjectStore.prototype.put=function(value,...args){const request=originalPut.call(this,value,...args);if(rejectSavedWrites&&this.name==='groups'&&value.state==='saved')this.transaction.abort();return request;};
 function drawMap(){
@@ -27,7 +28,7 @@ function drawMap(){
  for(const feature of features.values()){
   const shape=document.createElementNS(svg.namespaceURI,'path');
   shape.setAttribute('d',feature.geometry.coordinates.map(ring=>ring.map(([lon,lat],i)=>(i?'L':'M')+((lon-100.49)*16000)+','+(400-(lat-13.69)*20000)).join(' ')+' Z').join(' '));
-  shape.setAttribute('fill','#12aabb');shape.setAttribute('fill-opacity','.25');shape.setAttribute('fill-rule','evenodd');shape.setAttribute('stroke','#007c91');shape.setAttribute('stroke-width','2');svg.append(shape);
+  shape.setAttribute('fill',layerStyle.fillColor);shape.setAttribute('fill-opacity',String(layerStyle.fillOpacity));shape.setAttribute('fill-rule','evenodd');shape.setAttribute('stroke',layerStyle.strokeColor);shape.setAttribute('stroke-width',String(layerStyle.strokeWidth));svg.append(shape);
  }
 }
 const sdk = {
@@ -36,7 +37,7 @@ const sdk = {
  Editing:{getUnsavedChangesCount:()=>unsaved,getRedoChangesCount:()=>redo,isPracticeModeOn:()=>false,isSnapshotModeOn:()=>false,getCurrentSaveMode:()=>savingMode},
  Sidebar:{registerScriptTab:async()=>({tabLabel:document.querySelector('#label'),tabPane:document.querySelector('#pane')}),removeScriptTab:()=>document.querySelector('#pane').replaceChildren()},
  Events:{on:({eventName,eventHandler})=>{const set=listeners.get(eventName)||new Set();set.add(eventHandler);listeners.set(eventName,set);return()=>set.delete(eventHandler)},once:({eventName})=>new Promise(resolve=>{const off=sdk.Events.on({eventName,eventHandler:data=>{off();resolve(data)}})}),trackDataModelEvents:()=>{},stopDataModelEventsTracking:()=>{}},
- Map:{getMapCenter:()=>({lat:13.7,lon:100.5}),addLayer:()=>{},removeLayer:()=>{features.clear();drawMap()},setLayerVisibility:({visibility})=>{document.querySelector('#map').style.opacity=visibility?'1':'.25'},removeAllFeaturesFromLayer:()=>{features.clear();drawMap()},addFeaturesToLayer:({features:rows})=>{rows.forEach(row=>features.set(row.id,row));drawMap()},centerMapOnGeometry:()=>{}}
+ Map:{getMapCenter:()=>({lat:13.7,lon:100.5}),addLayer:({styleRules})=>{layerStyle={...layerStyle,...styleRules?.[0]?.style};drawMap()},removeLayer:()=>{features.clear();drawMap()},setLayerVisibility:({visibility})=>{document.querySelector('#map').style.opacity=visibility?'1':'.25'},removeAllFeaturesFromLayer:()=>{features.clear();drawMap()},addFeaturesToLayer:({features:rows})=>{rows.forEach(row=>features.set(row.id,row));drawMap()},centerMapOnGeometry:()=>{}}
 };
 sdk.DataModel={isNew:({dataModelName,objectId})=>newIds.has(dataModelName+':'+objectId),isDeleted:({dataModelName,objectId})=>deletedIds.has(dataModelName+':'+objectId)};
 for (const [moduleName,modelName] of Object.entries({Segments:'segments',Nodes:'nodes',Venues:'venues',MapComments:'mapComments',BigJunctions:'bigJunctions',RoadClosures:'roadClosures',MapUpdateRequests:'mapUpdateRequests',MapProblems:'mapProblems',Cities:'cities',Streets:'streets',Countries:'countries',States:'states',MajorTrafficEvents:'majorTrafficEvents',SegmentSuggestions:'segmentSuggestions',TurnClosures:'turnClosures',PermanentHazards:'permanentHazards',RestrictedDrivingAreas:'restrictedDrivingAreas'})) {
@@ -88,6 +89,13 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     assert.equal(await page.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),1);
     assert.equal(await page.locator('.record[data-state=saved]').count(),1);
     assert.equal(await page.locator('#map svg path').count()>0,true);
+    const colorControl=page.getByLabel('Boundary color',{exact:true});const opacityControl=page.getByLabel('Fill opacity',{exact:true});
+    assert.equal(await colorControl.inputValue(),'#12aabb');assert.equal(await opacityControl.inputValue(),'13');
+    await colorControl.fill('#cc3366');await opacityControl.fill('42');
+    assert.equal(await page.locator('#map svg path').first().getAttribute('fill'),'#cc3366');
+    assert.equal(await page.locator('#map svg path').first().getAttribute('stroke'),'#cc3366');
+    assert.equal(await page.locator('#map svg path').first().getAttribute('fill-opacity'),'0.42');
+    assert.equal(await page.locator('.range-row output').textContent(),'42%');
     await page.getByRole('checkbox',{name:'Show boundary',exact:true}).uncheck();
     await page.evaluate(()=>{window.__test.edit(99)});
     await page.waitForTimeout(250);
@@ -104,6 +112,7 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     const backup=JSON.parse(fs.readFileSync(await download.path(),'utf8'));
     assert.equal(backup.records.filter(r=>r.kind==='saved').length,2);
     assert.equal(backup.version,2);assert.equal(backup.groups.length,2);assert.ok(backup.groups.every(g=>g.candidate===null));
+    assert.deepEqual(backup.settings,{size:150,visible:true,color:'#cc3366',opacity:.42});
     const count=backup.records.length;
     await page.locator('input[type=file]').setInputFiles({name:'backup.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(backup))});
     await page.waitForTimeout(350);
@@ -130,6 +139,7 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     await page.reload();
     await page.getByText('Tracking automatically',{exact:true}).waitFor();
     await page.waitForFunction(()=>window.__test.features().length>0);
+    assert.equal(await page.getByLabel('Boundary color',{exact:true}).inputValue(),'#cc3366');assert.equal(await page.getByLabel('Fill opacity',{exact:true}).inputValue(),'42');
     assert.equal(await page.evaluate(async()=>(await window.__test.records()).length),count*2,'history survives reload');
     await page.evaluate(()=>window.__test.emit('wme-logged-out'));
     await page.getByText('Session ended',{exact:true}).waitFor();

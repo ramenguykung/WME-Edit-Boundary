@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         WME Edited Boundary
 // @namespace    wme-edited-boundary
-// @version      0.2.0
+// @version      1.0.0
 // @description  Automatically outlines confirmed saved editing work, with local history and portable backups.
+// @author       Ramenguykung
 // @match        https://www.waze.com/editor*
 // @match        https://www.waze.com/*/editor*
 // @match        https://beta.waze.com/editor*
@@ -25,7 +26,7 @@
  * @typedef {'addition'|'edit'|'deletion'|'unknown'|'undo'} Operation
  * @typedef {{id:string, kind:'activity'|'saved', at:string, sessionId:string, context:Context, model:string, objectType:string, objectId:string, operation:Operation, geometry:Geometry|null, beforeGeometry:Geometry|null, locationSource:string, status:string,groupId?:string}} Entry
  * @typedef {{id:string, context:Context, startedAt:string, endedAt:string|null, status:string, gaps:string[]}} Session
- * @typedef {{size:number, visible:boolean}} Settings
+ * @typedef {{size:number, visible:boolean, color:string, opacity:number}} Settings
  * @typedef {{format:'wme-edited-boundary',version:1|2,exportedAt:string,settings:Settings,sessions:Session[],records:Entry[],groups?:WorkGroup[],provenance?:{recordId:string,importedAt:string}[]}} Backup
  * @typedef {{model:string,objectType:string,objectId:string|number,geometry:Geometry|null,isNew:boolean,isDeleted:boolean,fingerprint:string,locationSource:string,baselineFingerprint?:string,baselineGeometry?:Geometry|null,classificationKnown?:boolean}} Snapshot
  * @typedef {{key:string,revision:number}} Token
@@ -35,6 +36,9 @@
 
 (function () {
   'use strict';
+
+  const DEFAULT_BOUNDARY_COLOR='#12aabb';
+  const DEFAULT_BOUNDARY_OPACITY=0.13;
 
   /** Shared grid implementation, also instantiated inside the geometry worker. */
   function createGeometryTools() {
@@ -254,10 +258,16 @@
   /** @param {unknown} value @returns {value is Context} */
   function validContext(value) { return object(value) && ['editor','region','environment'].every(k=>typeof value[k]==='string' && value[k].length>0 && value[k].length<200); }
 
+  /** @param {unknown} value @returns {value is string} */
+  function validColor(value) { return typeof value==='string' && /^#[0-9a-f]{6}$/i.test(value); }
+
   /** Validate an entire backup before any database mutation. @param {unknown} input @returns {Backup} */
   function validateBackup(input) {
     if (!object(input) || input.format!=='wme-edited-boundary' || ![1,2].includes(Number(input.version)) || typeof input.version!=='number') throw new Error('Unsupported backup format or version.');
     if (!object(input.settings) || typeof input.settings.size!=='number' || input.settings.size<50 || input.settings.size>5000 || !Number.isFinite(input.settings.size) || typeof input.settings.visible!=='boolean') throw new Error('Invalid backup settings.');
+    const color=input.settings.color===undefined?DEFAULT_BOUNDARY_COLOR:input.settings.color;
+    const opacity=input.settings.opacity===undefined?DEFAULT_BOUNDARY_OPACITY:input.settings.opacity;
+    if (!validColor(color) || typeof opacity!=='number' || !Number.isFinite(opacity) || opacity<0 || opacity>1) throw new Error('Invalid backup settings.');
     if (!Array.isArray(input.records) || !Array.isArray(input.sessions) || input.records.length>200000 || input.sessions.length>20000) throw new Error('Backup exceeds the import limits.');
     /** @param {unknown} x */
     const text = x => typeof x==='string' && x.length>0 && x.length<=2000;
@@ -285,7 +295,7 @@
     /** @type {Backup} */
     const backup = {
       format:'wme-edited-boundary',version:/** @type {1|2} */(input.version),exportedAt:String(input.exportedAt),
-      settings:{size:input.settings.size,visible:input.settings.visible},
+      settings:{size:input.settings.size,visible:input.settings.visible,color:color.toLowerCase(),opacity},
       sessions:input.sessions.map(s=>({id:s.id,context:contextCopy(s.context),startedAt:s.startedAt,endedAt:s.endedAt,status:s.status,gaps:[...s.gaps]})),
       records:mergeRecords([],input.records.map(r=>({
         id:r.id,kind:r.kind,at:r.at,sessionId:r.sessionId,context:contextCopy(r.context),model:r.model,objectType:r.objectType,objectId:r.objectId,
@@ -733,13 +743,18 @@
     let sessions=await store.all('sessions');
     /** @type {WorkGroup[]} */
     let groups=await store.all('groups');
-    /** @type {{id:string,size?:number,visible?:boolean,at?:string}[]} */
+    /** @type {{id:string,size?:number,visible?:boolean,color?:string,opacity?:number,at?:string}[]} */
     let metadata=await store.all('meta');
     let importedIds=new Set(metadata.filter(m=>m.id.startsWith('import:')).map(m=>m.id.slice(7)));
     let importedGroupIds=new Set(metadata.filter(m=>m.id.startsWith('import-group:')).map(m=>m.id.slice(13)));
     const savedSettings=metadata.find(m=>m.id==='settings');
     /** @type {Settings} */
-    let settings={size:savedSettings?.size&&savedSettings.size>=50&&savedSettings.size<=5000?savedSettings.size:300,visible:savedSettings?.visible??true};
+    let settings={
+      size:savedSettings?.size&&savedSettings.size>=50&&savedSettings.size<=5000?savedSettings.size:300,
+      visible:savedSettings?.visible??true,
+      color:validColor(savedSettings?.color)?savedSettings.color.toLowerCase():DEFAULT_BOUNDARY_COLOR,
+      opacity:typeof savedSettings?.opacity==='number'&&Number.isFinite(savedSettings.opacity)&&savedSettings.opacity>=0&&savedSettings.opacity<=1?savedSettings.opacity:DEFAULT_BOUNDARY_OPACITY
+    };
     // A reload can identify its previous session without interrupting another tab.
     const priorSessionId=sessionStorage.getItem('wme-edited-boundary-session');
     const priorSession=sessions.find(s=>s.id===priorSessionId&&!s.endedAt);
@@ -807,6 +822,7 @@
       .weboundary select,.weboundary input[type=date]{display:block;width:100%}.weboundary button{font:inherit;padding:5px 9px;margin:3px 5px 3px 0;border:1px solid #78909c;border-radius:4px;cursor:pointer;background:#edf7fa;color:#183b47}.weboundary button:disabled{opacity:.5;cursor:default}
       .weboundary .notice{padding:8px;border-left:3px solid #b06a00;background:#ffbd441a;white-space:pre-wrap}.weboundary .filters{display:grid;grid-template-columns:1fr 1fr;gap:0 8px}.weboundary .record{border-top:1px solid #9996;padding:8px 0;overflow-wrap:anywhere}.weboundary small{display:block;opacity:.8}
       .weboundary details{margin:10px 0}.weboundary summary{cursor:pointer}.weboundary input[type=number]{width:100px;margin-right:6px}.weboundary .status{font-weight:600}.weboundary .error{color:#b32b14}.weboundary progress{width:100%}
+      .weboundary .appearance{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.weboundary input[type=color]{display:block;width:100%;height:34px;padding:2px}.weboundary .range-row{display:flex;align-items:center;gap:7px}.weboundary input[type=range]{flex:1;min-width:0;padding:0;border:0}.weboundary output{min-width:3.5em;text-align:right;font-variant-numeric:tabular-nums}
       .weboundary .session-controls{grid-column:1/-1}.weboundary button.delete-session{display:block;color:#b32b14;text-decoration:underline;background:transparent;border:0;padding:2px 0;margin:4px 0;text-align:left}.weboundary button.delete-session:focus-visible{outline:2px solid currentColor;outline-offset:3px}.weboundary .actions{padding:4px 0 0 12px;border-left:2px solid #9995}.weboundary .outcome{font-weight:600}.weboundary .history-note{margin:4px 0 10px}.weboundary .record>summary{overflow-wrap:anywhere}
     `;
     root.append(style,element('h2','Edited Boundary'));
@@ -821,6 +837,12 @@
     const applySize=button('Apply',()=>{const n=Number(sizeInput.value);if(!Number.isFinite(n)||n<50||n>5000)throw new Error('Choose a tile size between 50 and 5,000 metres.');settings.size=n;saveSettings();requestRender();});
     sizeLabel.append(sizeInput,applySize);root.append(sizeLabel);
     const localSize=element('small');root.append(localSize);
+    const appearance=element('div');appearance.className='appearance';root.append(appearance);
+    const colorLabel=element('label','Boundary color');const colorInput=document.createElement('input');colorInput.type='color';colorInput.setAttribute('aria-label','Boundary color');colorInput.value=settings.color;colorLabel.append(colorInput);appearance.append(colorLabel);
+    const opacityLabel=element('label','Fill opacity');const opacityRow=element('div');opacityRow.className='range-row';const opacityInput=document.createElement('input');opacityInput.type='range';opacityInput.min='0';opacityInput.max='100';opacityInput.step='1';opacityInput.setAttribute('aria-label','Fill opacity');const opacityValue=document.createElement('output');opacityRow.append(opacityInput,opacityValue);opacityLabel.append(opacityRow);appearance.append(opacityLabel);
+    function syncAppearanceControls(){colorInput.value=settings.color;opacityInput.value=String(Math.round(settings.opacity*100));opacityValue.textContent=`${Math.round(settings.opacity*100)}%`;}
+    function updateAppearance(){settings.color=colorInput.value.toLowerCase();settings.opacity=Number(opacityInput.value)/100;opacityValue.textContent=`${opacityInput.value}%`;try{restyleBoundary();}catch(error){showError(error);}}
+    syncAppearanceControls();colorInput.oninput=opacityInput.oninput=updateAppearance;colorInput.onchange=opacityInput.onchange=saveSettings;
     const historySection=element('section');historySection.className='history-section';historySection.append(element('h3','History'));root.append(historySection);
     const filters=element('div');filters.className='filters';historySection.append(filters);
     const periodStartLabel=element('label','From');const from=document.createElement('input');from.type='date';periodStartLabel.append(from);filters.append(periodStartLabel);
@@ -1159,9 +1181,16 @@
         outlines=result.polygons||[];cellCount=result.cells||0;boundaryErrors=new Map(result.errors||[]);
         try{
           sdk.Map.removeAllFeaturesFromLayer({layerName});
-          const features=outlines.map((geometry,i)=>({type:/** @type {const} */('Feature'),id:`boundary-${i}`,geometry,properties:{kind:'saved boundary'}}));
-          for(let i=0;i<features.length;i+=200)sdk.Map.addFeaturesToLayer({layerName,features:features.slice(i,i+200)});
+          addBoundaryFeatures();
         }catch(error){showError(error);}drawStatus();
+    }
+    function addBoundaryFeatures(){
+      const features=outlines.map((geometry,i)=>({type:/** @type {const} */('Feature'),id:`boundary-${i}`,geometry,properties:{kind:'saved boundary'}}));
+      for(let i=0;i<features.length;i+=200)sdk.Map.addFeaturesToLayer({layerName,features:features.slice(i,i+200)});
+    }
+    function addBoundaryLayer(){sdk.Map.addLayer({layerName,styleRules:[{style:{strokeColor:settings.color,strokeWidth:2,fillColor:settings.color,fillOpacity:settings.opacity,pointerEvents:'none'}}]});}
+    function restyleBoundary(){
+      sdk.Map.removeLayer({layerName});addBoundaryLayer();sdk.Map.setLayerVisibility({layerName,visibility:settings.visible});addBoundaryFeatures();
     }
     /** @type {NonNullable<Parameters<typeof boundaryWorker>[0]>} */
     const fallback={onmessage:null,postMessage:data=>receiveBoundary(new MessageEvent('message',{data}))};
@@ -1210,7 +1239,7 @@
       records=mergeRecords(/** @type {Entry[]} */(await store.all('records')),unsavedLocal);sessions=await store.all('sessions');metadata=await store.all('meta');groups=await store.all('groups');
       importedIds=new Set(metadata.filter(m=>m.id.startsWith('import:')).map(m=>m.id.slice(7)));
       importedGroupIds=new Set(metadata.filter(m=>m.id.startsWith('import-group:')).map(m=>m.id.slice(13)));
-      if(restoreSettings.checked){settings={...backup.settings};visible.checked=settings.visible;sizeInput.value=String(settings.size);sdk.Map.setLayerVisibility({layerName,visibility:settings.visible});}
+      if(restoreSettings.checked){settings={...backup.settings};visible.checked=settings.visible;sizeInput.value=String(settings.size);syncAppearanceControls();restyleBoundary();}
       updateSessionChoices();requestRender();channel?.postMessage('history');importInput.value='';
     })().catch(showError);};
     async function deleteSelectedSession(){
@@ -1223,7 +1252,7 @@
       updateSessionChoices();requestRender();channel?.postMessage('history');
     }
 
-    sdk.Map.addLayer({layerName,styleRules:[{style:{strokeColor:'#007c91',strokeWidth:2,fillColor:'#12aabb',fillOpacity:0.13,pointerEvents:'none'}}]});
+    addBoundaryLayer();
     sdk.Map.setLayerVisibility({layerName,visibility:settings.visible});
     for(const reader of readers){if(reader.model){try{sdk.Events.trackDataModelEvents({dataModelName:reader.model});tracked.add(reader.model);}catch(error){gap(`${reader.type}: SDK model tracking unavailable.`);}}}
     const capabilities=document.createElement('table');capabilities.style.cssText='width:100%;font-size:12px;border-collapse:collapse';

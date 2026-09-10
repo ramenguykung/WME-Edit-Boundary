@@ -12,7 +12,7 @@ function fixture() {
     format: "wme-edited-boundary",
     version: 1,
     exportedAt: at,
-    settings: { size: 300, visible: true },
+    settings: { size: 300, visible: true, color: "#12aabb", opacity: 0.13 },
     sessions: [{ id: "session-a", context, startedAt: at, endedAt: null, status: "interrupted", gaps: ["An object location was unavailable."] }],
     records: [{
       id: "record-a",
@@ -53,6 +53,13 @@ test("a JSON backup round trip retains evidence, context and settings", () => {
   const restored = validateBackup(JSON.parse(JSON.stringify(original)));
   assert.deepEqual(restored, original);
   assert.notEqual(restored, original);
+});
+
+test("older backups receive default appearance settings", () => {
+  const backup = fixture();
+  delete backup.settings.color;
+  delete backup.settings.opacity;
+  assert.deepEqual(validateBackup(backup).settings, { size: 300, visible: true, color: "#12aabb", opacity: 0.13 });
 });
 
 test("importing the same records twice is idempotent", () => {
@@ -196,6 +203,16 @@ test("invalid tile settings are rejected before importing history", () => {
   const backup = fixture();
   backup.settings.visible = "true";
   assert.throws(() => validateBackup(backup), /settings/i);
+  for (const color of ["red", "#12345", "#1234567", 123456]) {
+    const invalid = fixture();
+    invalid.settings.color = color;
+    assert.throws(() => validateBackup(invalid), /settings/i);
+  }
+  for (const opacity of [-0.01, 1.01, "0.5", NaN, Infinity]) {
+    const invalid = fixture();
+    invalid.settings.opacity = opacity;
+    assert.throws(() => validateBackup(invalid), /settings/i);
+  }
 });
 
 test("records cannot refer to an absent or foreign-context session", () => {

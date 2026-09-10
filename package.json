@@ -1,6 +1,6 @@
 {
   "name": "wme-edited-boundary",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Tampermonkey userscript recording the footprint of saved WME edits through the official SDK.",
   "scripts": {
