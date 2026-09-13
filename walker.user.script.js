@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Edited Boundary
 // @namespace    wme-edited-boundary
-// @version      1.0.0
+// @version      1.0.1
 // @description  Automatically outlines confirmed saved editing work, with local history and portable backups.
 // @author       Ramenguykung
 // @match        https://www.waze.com/editor*
@@ -151,6 +151,31 @@
       return cells;
     }
 
+    /** Split a closed grid walk into simple cycles before removing collinear vertices.
+     * @param {Position[]} walk @returns {Position[][]}
+     */
+    function splitWalk(walk) {
+      /** @type {Position[][]} */
+      const cycles = [];
+      /** @type {Position[]} */
+      const stack = [];
+      /** @type {Map<string,number>} */
+      const positions = new Map();
+      for (const point of walk) {
+        const key = point.join(',');
+        const start = positions.get(key);
+        if (start === undefined) {
+          positions.set(key, stack.length);
+          stack.push(point);
+        } else {
+          cycles.push(stack.slice(start).concat([point]));
+          for (let i = start + 1; i < stack.length; i++) positions.delete(stack[i].join(','));
+          stack.length = start + 1;
+        }
+      }
+      return cycles;
+    }
+
     /**
      * Trace exposed tile edges into polygons, retaining holes and disconnected areas.
      * @param {Set<string>} cells @param {number} size @returns {Polygon[]}
@@ -199,22 +224,27 @@
           if (!choices[0] || ++guard > cells.size * 4) throw new Error('Boundary could not be closed.');
           current = choices[0];
         }
-        const compact = ring.slice(0,-1).filter((p,i,a) => {
-          const before = a[(i+a.length-1)%a.length];
-          const after = a[(i+1)%a.length];
-          return (p[0]-before[0])*(after[1]-p[1]) !== (p[1]-before[1])*(after[0]-p[0]);
-        });
-        if (compact.length < 3) continue;
-        compact.push(compact[0]);
-        let area = 0;
-        for (let i=1;i<compact.length;i++) area += compact[i-1][0]*compact[i][1]-compact[i][0]*compact[i-1][1];
-        rings.push({ring:compact,area:area/2});
+        for (const cycle of splitWalk(ring)) {
+          const compact = cycle.slice(0,-1).filter((p,i,a) => {
+            const before = a[(i+a.length-1)%a.length];
+            const after = a[(i+1)%a.length];
+            return (p[0]-before[0])*(after[1]-p[1]) !== (p[1]-before[1])*(after[0]-p[0]);
+          });
+          if (compact.length < 3) continue;
+          compact.push(compact[0]);
+          let area = 0;
+          for (let i=1;i<compact.length;i++) area += compact[i-1][0]*compact[i][1]-compact[i][0]*compact[i-1][1];
+          rings.push({ring:compact,area:area/2});
+        }
       }
       const outer = rings.filter(r=>r.area>0).sort((a,b)=>a.area-b.area);
       /** @type {Position[][][]} */
       const groups = outer.map(r=>[r.ring]);
       for (const hole of rings.filter(r=>r.area<0)) {
-        const owner = outer.findIndex(r=>inRing(hole.ring[0], r.ring));
+        // A hole vertex can touch its shell. Sample just inside the clockwise ring.
+        const [a,b] = hole.ring;
+        const sample = [(a[0]+b[0])/2+Math.sign(b[1]-a[1])*0.25, (a[1]+b[1])/2-Math.sign(b[0]-a[0])*0.25];
+        const owner = outer.findIndex(r=>inRing(sample, r.ring));
         if (owner < 0) throw new Error('Boundary hole has no surrounding polygon.');
         groups[owner].push(hole.ring);
       }
@@ -228,6 +258,33 @@
     if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
     if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${stable(/** @type {Record<string,unknown>} */(value)[k])}`).join(',')}}`;
     return JSON.stringify(value) ?? 'null';
+  }
+
+  /** Add boundary polygons through SDK validation, isolating rejected features.
+   * @param {Pick<WmeSDK['Map'],'addFeaturesToLayer'|'removeFeaturesFromLayer'>} map
+   * @param {string} layerName @param {Polygon[]} polygons
+   * @param {(failure:{index:number,featureId:string,geometry:Polygon,error:unknown})=>void} onRejected
+   */
+  function submitBoundaryFeatures(map, layerName, polygons, onRejected) {
+    const features = polygons.map((geometry,index)=>({type:/** @type {const} */('Feature'),id:`boundary-${index}`,geometry,properties:{kind:'saved boundary'}}));
+    for (let offset=0;offset<features.length;offset+=200) {
+      const batch = features.slice(offset,offset+200);
+      try { map.addFeaturesToLayer({layerName,features:batch}); }
+      catch (error) {
+        if (!object(error) || error.name!=='ValidationError') throw error;
+        // Clear any partial insertion before retrying with the same stable IDs.
+        map.removeFeaturesFromLayer({layerName,featureIds:batch.map(feature=>feature.id)});
+        for (let index=0;index<batch.length;index++) {
+          const feature = batch[index];
+          try { map.addFeaturesToLayer({layerName,features:[feature]}); }
+          catch (error) {
+            if (!object(error) || error.name!=='ValidationError') throw error;
+            map.removeFeaturesFromLayer({layerName,featureIds:[feature.id]});
+            onRejected({index:offset+index,featureId:feature.id,geometry:structuredClone(feature.geometry),error});
+          }
+        }
+      }
+    }
   }
 
   /** @param {unknown} value @returns {value is Record<string,unknown>} */
@@ -680,7 +737,7 @@
 
   // Node exercises the shipped core and storage without starting WME integration.
   if (typeof module!=='undefined' && module.exports) {
-    module.exports={createGeometryTools,validateBackup,mergeRecords,Recorder,HistoryStore,validGeometry,stable};
+    module.exports={createGeometryTools,submitBoundaryFeatures,validateBackup,mergeRecords,Recorder,HistoryStore,validGeometry,stable};
     return;
   }
 
@@ -786,6 +843,13 @@
     let outlines=[];
     /** @type {Map<string,string>} */
     let boundaryErrors=new Map();
+    /** @type {Map<string,string>} SDK rejections are display errors, not missing history. */
+    let boundaryRenderErrors=new Map();
+    /** @typedef {{generation:number,size:number,filters:Record<string,string>}} BoundaryContext */
+    /** @type {BoundaryContext|null} */
+    let requestedBoundaryContext=null;
+    /** @type {BoundaryContext|null} Metadata belongs to the displayed outlines, even during a pending update. */
+    let outlineContext=null;
     /** @type {Map<string,Snapshot>} Last clean model observations, bounded independently of pending work. */
     const cache=new Map();
     /** @type {Set<string>} Models with successfully registered SDK tracking. */
@@ -1117,9 +1181,9 @@
     function drawStatus(){
       status.textContent=closed?'Session ended':storageFailed?'Storage error — recent work is held in memory':ready?'Tracking automatically':'Waiting for a clean edit state';
       const rows=historyRows();const pending=rows.filter(r=>r.state==='pending').length;const interrupted=rows.filter(r=>r.state==='interrupted').length;
-      summary.textContent=`${records.filter(r=>r.kind==='saved'&&inContext(r)).length.toLocaleString()} saved records · ${pending.toLocaleString()} pending objects · ${interrupted.toLocaleString()} unconfirmed history groups · ${cellCount.toLocaleString()} displayed tiles`;
-      warning.textContent='Coverage is incomplete for workflows without SDK save evidence. ' + (session.gaps.length?`${session.gaps.length} coverage notes are listed below. `:'')+(boundaryErrors.size?`${boundaryErrors.size} footprints could not be outlined.`:'');
-      gapsList.replaceChildren(...session.gaps.map(g=>element('p',g)),...Array.from(new Set(boundaryErrors.values())).slice(0,10).map(g=>element('p',g)));
+      summary.textContent=`${records.filter(r=>r.kind==='saved'&&inContext(r)).length.toLocaleString()} saved records · ${pending.toLocaleString()} pending objects · ${interrupted.toLocaleString()} unconfirmed history groups · ${cellCount.toLocaleString()} covered tiles`;
+      warning.textContent='Coverage is incomplete for workflows without SDK save evidence. ' + (session.gaps.length?`${session.gaps.length} coverage notes are listed below. `:'')+(boundaryErrors.size?`${boundaryErrors.size} footprints could not be outlined. `:'')+(boundaryRenderErrors.size?`${boundaryRenderErrors.size} boundary polygons could not be displayed; accepted areas remain visible.`:'');
+      gapsList.replaceChildren(...session.gaps.map(g=>element('p',g)),...Array.from(new Set(boundaryErrors.values())).slice(0,10).map(g=>element('p',g)),...Array.from(boundaryRenderErrors.values()).slice(0,10).map(g=>element('p',g)));
       try{const latitude=sdk.Map.getMapCenter().lat;localSize.textContent=`At this latitude: about ${Math.round(settings.size*Math.cos(latitude*Math.PI/180))} metres per tile. Grid edges are approximate.`;}catch{localSize.textContent='Ground distance varies with latitude. Grid edges are approximate.';}
       progress.hidden=!updating;
     }
@@ -1177,16 +1241,21 @@
         /** @type {{request:number,polygons?:Polygon[],cells?:number,errors?:[string,string][],error?:string}} */
         const result=event.data;if(result.request!==workerGeneration)return;
         updating=false;
-        if(result.error){outlines=[];cellCount=0;boundaryErrors=new Map([['boundary',result.error]]);try{sdk.Map.removeAllFeaturesFromLayer({layerName});}catch{}showError(result.error);drawStatus();return;}
-        outlines=result.polygons||[];cellCount=result.cells||0;boundaryErrors=new Map(result.errors||[]);
+        if(result.error){outlines=[];outlineContext=null;cellCount=0;boundaryRenderErrors.clear();boundaryErrors=new Map([['boundary',result.error]]);try{sdk.Map.removeAllFeaturesFromLayer({layerName});}catch{}showError(result.error);drawStatus();return;}
+        outlines=result.polygons||[];outlineContext=requestedBoundaryContext;cellCount=result.cells||0;boundaryErrors=new Map(result.errors||[]);
         try{
           sdk.Map.removeAllFeaturesFromLayer({layerName});
           addBoundaryFeatures();
         }catch(error){showError(error);}drawStatus();
     }
     function addBoundaryFeatures(){
-      const features=outlines.map((geometry,i)=>({type:/** @type {const} */('Feature'),id:`boundary-${i}`,geometry,properties:{kind:'saved boundary'}}));
-      for(let i=0;i<features.length;i+=200)sdk.Map.addFeaturesToLayer({layerName,features:features.slice(i,i+200)});
+      boundaryRenderErrors.clear();
+      try {
+        submitBoundaryFeatures(sdk.Map,layerName,outlines,failure=>{
+          boundaryRenderErrors.set(failure.featureId,`${failure.featureId}: WME rejected this polygon. Geometry and render settings are in the browser console.`);
+          console.error('[Edited Boundary] Boundary polygon rejected',{...failure,...structuredClone(outlineContext)});
+        });
+      } finally { drawStatus(); }
     }
     function addBoundaryLayer(){sdk.Map.addLayer({layerName,styleRules:[{style:{strokeColor:settings.color,strokeWidth:2,fillColor:settings.color,fillOpacity:settings.opacity,pointerEvents:'none'}}]});}
     function restyleBoundary(){
@@ -1210,6 +1279,7 @@
       const add=eligible.filter(r=>reset||!renderedIds.has(r.id)).map(r=>({id:r.id,geometries:[r.geometry,r.operation==='edit'?r.beforeGeometry:null].filter(g=>g!==null)}));
       if(!reset&&!remove.length&&!add.length)return;
       renderedIds=ids;renderedSize=settings.size;updating=true;drawStatus();const message={request:++workerGeneration,size:settings.size,remove,add};
+      requestedBoundaryContext={generation:message.request,size:message.size,filters:{from:from.value,through:through.value,object:category.value,workType:operation.value,session:sessionFilter.value,source:sourceFilter.value}};
       if(worker)worker.postMessage(message);else window.setTimeout(()=>{if(!closed)fallback.onmessage?.(new MessageEvent('message',{data:message}));},0);
     }
     /** @param {unknown} data @param {string} name */

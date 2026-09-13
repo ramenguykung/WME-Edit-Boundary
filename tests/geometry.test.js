@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createGeometryTools } = require("../walker.user.script.js");
+const touchingHole = require("./fixtures/touching-hole-300m.json");
 
 const earthRadius = 6378137;
 
@@ -140,5 +141,86 @@ test("unsupported coordinates and tile sizes cannot produce misleading coverage"
   }
   for (const size of [0, 49, 5001, NaN, Infinity]) {
     assert.throws(() => geometry.geometryCells({ type: "Point", coordinates: [0, 0] }, size));
+  }
+});
+
+/** Check topology and coverage independently in exact integer grid coordinates. */
+function assertGridCoverage(polygons, cells, size) {
+  const tools = createGeometryTools();
+  const grid = polygons.map(polygon => {
+    assert.equal(polygon.type, "Polygon");
+    return polygon.coordinates.map(ring => ring.map(point => {
+      assert.equal(point.length, 2);
+      assert.ok(point.every(Number.isFinite));
+      return tools.project(point).map(n => Math.round(n / size));
+    }));
+  });
+  let totalArea = 0;
+  const between = (n, a, b) => n >= Math.min(a, b) && n <= Math.max(a, b);
+  const onSegment = (p, a, b) => (p[0]-a[0])*(b[1]-a[1]) === (p[1]-a[1])*(b[0]-a[0]) && between(p[0],a[0],b[0]) && between(p[1],a[1],b[1]);
+  for (const polygon of grid) for (const [ringIndex, ring] of polygon.entries()) {
+    assert.ok(ring.length >= 4);
+    assert.deepEqual(ring[0], ring.at(-1));
+    assert.equal(new Set(ring.slice(0,-1).map(p => p.join(','))).size, ring.length-1, 'ring cannot self-touch');
+    const area = ring.slice(1).reduce((sum,p,i) => sum+ring[i][0]*p[1]-p[0]*ring[i][1],0)/2;
+    assert.ok(ringIndex === 0 ? area > 0 : area < 0, 'shell/hole winding');
+    totalArea += area;
+    for (let i=0;i<ring.length-1;i++) for (let j=i+2;j<ring.length-1;j++) {
+      if (i===0 && j===ring.length-2) continue;
+      const a=ring[i], b=ring[i+1], c=ring[j], d=ring[j+1];
+      const crossing = a[0]===b[0] && c[1]===d[1] && between(a[0],c[0],d[0]) && between(c[1],a[1],b[1]) || a[1]===b[1] && c[0]===d[0] && between(c[0],a[0],b[0]) && between(a[1],c[1],d[1]);
+      assert.ok(!crossing && !onSegment(a,c,d) && !onSegment(b,c,d) && !onSegment(c,a,b) && !onSegment(d,a,b), 'nonadjacent edges cannot intersect');
+    }
+  }
+  assert.equal(totalArea, cells.size);
+  const inside = (p, ring) => {
+    let result=false;
+    for (let i=0,j=ring.length-1;i<ring.length;j=i++) {
+      const a=ring[i],b=ring[j];
+      if ((a[1]>p[1])!==(b[1]>p[1]) && p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0]) result=!result;
+    }
+    return result;
+  };
+  const points=[...cells].map(key=>key.split(',').map(Number));
+  for (let x=Math.min(...points.map(p=>p[0]))-1;x<=Math.max(...points.map(p=>p[0]))+1;x++) {
+    for (let y=Math.min(...points.map(p=>p[1]))-1;y<=Math.max(...points.map(p=>p[1]))+1;y++) {
+      const p=[x+.5,y+.5];
+      const owners=grid.filter(polygon=>inside(p,polygon[0])&&!polygon.slice(1).some(ring=>inside(p,ring))).length;
+      assert.equal(owners,cells.has(`${x},${y}`)?1:0,`coverage of ${x},${y}`);
+    }
+  }
+}
+
+test("reported 300-metre boundary retains its tangent hole as two simple rings", () => {
+  for (const [dx,dy] of [[0,0],[37111,5210],[-120,-80]]) {
+    const cells=new Set(touchingHole.cells.map(([x,y])=>`${x+dx},${y+dy}`));
+    const polygons=createGeometryTools().cellsToPolygons(cells,touchingHole.size);
+    assert.equal(polygons.length,1);
+    assert.deepEqual(polygons[0].coordinates.map(r=>r.length),touchingHole.expectedRingLengths);
+    assertGridCoverage(polygons,cells,touchingHole.size);
+  }
+});
+
+test("diagonal holes remain separate and an island keeps its own boundary", () => {
+  const diagonal=new Set(),island=new Set();
+  for(let x=0;x<5;x++) for(let y=0;y<5;y++) {
+    if (!(x===1&&y===1) && !(x===2&&y===2)) diagonal.add(`${x},${y}`);
+    if (x===0||x===4||y===0||y===4||x===2&&y===2) island.add(`${x},${y}`);
+  }
+  const holes=createGeometryTools().cellsToPolygons(diagonal,100);
+  assert.equal(holes.length,1);assert.equal(holes[0].coordinates.length,3);
+  assertGridCoverage(holes,diagonal,100);
+  const islands=createGeometryTools().cellsToPolygons(island,100);
+  assert.equal(islands.length,2);
+  assertGridCoverage(islands,island,100);
+});
+
+test("all nonempty 3-by-3 tile patterns preserve simple rings and exact coverage", () => {
+  for (let mask=1;mask<512;mask++) {
+    const cells=new Set();
+    for(let bit=0;bit<9;bit++) if(mask&(1<<bit)) cells.add(`${bit%3},${Math.floor(bit/3)}`);
+    assertGridCoverage(createGeometryTools().cellsToPolygons(cells,100),cells,100);
+    const reversed=new Set([...cells].reverse());
+    assertGridCoverage(createGeometryTools().cellsToPolygons(reversed,100),reversed,100);
   }
 });

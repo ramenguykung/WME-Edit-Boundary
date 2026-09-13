@@ -7,6 +7,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const source = fs.readFileSync(path.join(__dirname, '../walker.user.script.js'), 'utf8');
+const touchingHole = require('./fixtures/touching-hole-300m.json');
+const {createGeometryTools} = require('../walker.user.script.js');
 
 const fixture = `<!doctype html><html><head><title>Edited Boundary SDK simulation</title></head>
 <body style="font-family:system-ui;background:#eef2f5;margin:0"><main style="display:flex;gap:24px;padding:24px"><aside style="width:370px;background:white"><div id="label"></div><div id="pane"></div></aside><section><h1>WME SDK simulation</h1><p>This page uses synthetic data. No Waze edits are made.</p><div id="map" style="width:700px;height:600px;background:#dce8df"></div></section></main><script>
@@ -18,6 +20,20 @@ models.set('segments', new Map([[1,original]]));
 let unsaved = location.search.includes('dirty')?1:0, redo = 0, savingMode = 'IDLE', edits=0, rejectSavedWrites=false;
 const newIds = new Set(), deletedIds = new Set();
 const features = new Map();
+const rejectedFeatures = new Set(), rejectionDiagnostics = [];
+const originalConsoleError=console.error;
+console.error=(...args)=>{if(args[0]==='[Edited Boundary] Boundary polygon rejected')rejectionDiagnostics.push(structuredClone(args[1]));originalConsoleError(...args);};
+function addMapFeatures(rows){
+ for(const row of rows){
+  const geometry=row.geometry;
+  const invalid=geometry.type!=='Polygon'||geometry.coordinates.some(ring=>ring.length<4||JSON.stringify(ring[0])!==JSON.stringify(ring.at(-1))||ring.some(p=>p.length!==2||!p.every(Number.isFinite))||new Set(ring.slice(0,-1).map(p=>p.join(','))).size!==ring.length-1);
+  if(invalid)throw Object.assign(new Error('Invalid polygon topology'),{name:'ValidationError'});
+  if(features.has(row.id))throw new Error('Duplicate feature '+row.id);
+  features.set(row.id,row);
+  if(rejectedFeatures.has(row.id))throw Object.assign(new Error('Injected geometry rejection'),{name:'ValidationError'});
+ }
+ drawMap();
+}
 let layerStyle = {fillColor:'#12aabb',fillOpacity:.13,strokeColor:'#12aabb',strokeWidth:2};
 const originalPut=IDBObjectStore.prototype.put;
 IDBObjectStore.prototype.put=function(value,...args){const request=originalPut.call(this,value,...args);if(rejectSavedWrites&&this.name==='groups'&&value.state==='saved')this.transaction.abort();return request;};
@@ -37,7 +53,7 @@ const sdk = {
  Editing:{getUnsavedChangesCount:()=>unsaved,getRedoChangesCount:()=>redo,isPracticeModeOn:()=>false,isSnapshotModeOn:()=>false,getCurrentSaveMode:()=>savingMode},
  Sidebar:{registerScriptTab:async()=>({tabLabel:document.querySelector('#label'),tabPane:document.querySelector('#pane')}),removeScriptTab:()=>document.querySelector('#pane').replaceChildren()},
  Events:{on:({eventName,eventHandler})=>{const set=listeners.get(eventName)||new Set();set.add(eventHandler);listeners.set(eventName,set);return()=>set.delete(eventHandler)},once:({eventName})=>new Promise(resolve=>{const off=sdk.Events.on({eventName,eventHandler:data=>{off();resolve(data)}})}),trackDataModelEvents:()=>{},stopDataModelEventsTracking:()=>{}},
- Map:{getMapCenter:()=>({lat:13.7,lon:100.5}),addLayer:({styleRules})=>{layerStyle={...layerStyle,...styleRules?.[0]?.style};drawMap()},removeLayer:()=>{features.clear();drawMap()},setLayerVisibility:({visibility})=>{document.querySelector('#map').style.opacity=visibility?'1':'.25'},removeAllFeaturesFromLayer:()=>{features.clear();drawMap()},addFeaturesToLayer:({features:rows})=>{rows.forEach(row=>features.set(row.id,row));drawMap()},centerMapOnGeometry:()=>{}}
+ Map:{getMapCenter:()=>({lat:13.7,lon:100.5}),addLayer:({styleRules})=>{layerStyle={...layerStyle,...styleRules?.[0]?.style};drawMap()},removeLayer:()=>{features.clear();drawMap()},setLayerVisibility:({visibility})=>{document.querySelector('#map').style.opacity=visibility?'1':'.25'},removeAllFeaturesFromLayer:()=>{features.clear();drawMap()},removeFeaturesFromLayer:({featureIds})=>{featureIds.forEach(id=>features.delete(id));drawMap()},addFeaturesToLayer:({features:rows})=>addMapFeatures(rows),centerMapOnGeometry:()=>{}}
 };
 sdk.DataModel={isNew:({dataModelName,objectId})=>newIds.has(dataModelName+':'+objectId),isDeleted:({dataModelName,objectId})=>deletedIds.has(dataModelName+':'+objectId)};
 for (const [moduleName,modelName] of Object.entries({Segments:'segments',Nodes:'nodes',Venues:'venues',MapComments:'mapComments',BigJunctions:'bigJunctions',RoadClosures:'roadClosures',MapUpdateRequests:'mapUpdateRequests',MapProblems:'mapProblems',Cities:'cities',Streets:'streets',Countries:'countries',States:'states',MajorTrafficEvents:'majorTrafficEvents',SegmentSuggestions:'segmentSuggestions',TurnClosures:'turnClosures',PermanentHazards:'permanentHazards',RestrictedDrivingAreas:'restrictedDrivingAreas'})) {
@@ -55,6 +71,8 @@ window.__test={
  failWrites(value){rejectSavedWrites=value},
  fail(){emit('wme-save-finished',{success:false})},
  features:()=>Array.from(features.values()),
+ rejectFeatures(ids){rejectedFeatures.clear();ids.forEach(id=>rejectedFeatures.add(id))},
+ diagnostics:()=>rejectionDiagnostics,
  emit,
  records:(name='records')=>new Promise((resolve,reject)=>{const r=indexedDB.open('wme-edited-boundary');r.onerror=()=>reject(r.error);r.onsuccess=()=>{const q=r.result.transaction(name).objectStore(name).getAll();q.onsuccess=()=>{resolve(q.result);r.result.close()};q.onerror=()=>reject(q.error)}})
 };
@@ -161,6 +179,50 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     await fallback.close();
     const scenario=async()=>{const p=await browser.newPage();p.on('pageerror',error=>errors.push(error.message));await p.goto(base+'/editor');await p.getByText('Tracking automatically',{exact:true}).waitFor();return p;};
     const savedCount=(p,n)=>p.waitForFunction(async expected=>(await window.__test.records()).filter(r=>r.kind==='saved').length===expected,n);
+
+    const gridTools=createGeometryTools();
+    const sampleRecord=backup.records.find(r=>r.kind==='saved');
+    const boundaryBackup=(cells)=>({format:backup.format,version:2,exportedAt:backup.exportedAt,settings:{...backup.settings,size:300},sessions:[backup.sessions[0]],records:cells.map(([x,y],index)=>({...sampleRecord,id:'boundary-fixture-'+index,groupId:undefined,sessionId:backup.sessions[0].id,operation:'addition',geometry:{type:'Point',coordinates:gridTools.unproject([(x+.5)*300,(y+.5)*300])},beforeGeometry:null})),groups:[],provenance:[]});
+    for(const workerMode of ['', '?no-worker']){
+      const boundary=await scenario();
+      if(workerMode){await boundary.goto(base+'/editor'+workerMode);await boundary.getByText('Tracking automatically',{exact:true}).waitFor();}
+      await boundary.locator('input[type=file]').setInputFiles({name:'touching-hole.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(boundaryBackup(touchingHole.cells)))});
+      await boundary.waitForFunction(()=>window.__test.features().length===1);
+      assert.deepEqual(await boundary.evaluate(()=>window.__test.features()[0].geometry.coordinates.map(r=>r.length)),[21,5]);
+      await boundary.getByLabel('Boundary color',{exact:true}).fill('#3344aa');
+      assert.deepEqual(await boundary.evaluate(()=>window.__test.features()[0].geometry.coordinates.map(r=>r.length)),[21,5],'restyling retains the tangent hole');
+      assert.equal(await boundary.locator('.notice').filter({hasText:'boundary polygons could not be displayed'}).count(),0);
+      await boundary.close();
+    }
+
+    const partial=await scenario();
+    await partial.evaluate(()=>window.__test.rejectFeatures(['boundary-9']));
+    await partial.locator('input[type=file]').setInputFiles({name:'separate-cells.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(boundaryBackup(Array.from({length:205},(_,i)=>[i*3,0]))))});
+    await partial.waitForFunction(()=>window.__test.features().length===204);
+    await partial.getByText('1 boundary polygons could not be displayed',{exact:false}).first().waitFor();
+    assert.ok(await partial.evaluate(()=>window.__test.features().some(f=>f.id==='boundary-204')),'later batches still draw');
+    assert.ok((await partial.locator('section.weboundary').textContent()).includes('205 covered tiles'));
+    const diagnostic=await partial.evaluate(()=>window.__test.diagnostics().at(-1));
+    assert.equal(diagnostic.index,9);assert.equal(diagnostic.featureId,'boundary-9');assert.equal(diagnostic.size,300);
+    assert.ok(diagnostic.generation>0);assert.deepEqual(diagnostic.filters,{from:'',through:'',object:'',workType:'',session:'',source:''});
+    assert.equal(diagnostic.geometry.type,'Polygon');assert.equal(typeof diagnostic.geometry.coordinates[0][0][0],'number');
+    await partial.getByLabel('Boundary color',{exact:true}).fill('#112233');
+    assert.equal(await partial.evaluate(()=>window.__test.features().length),204);
+    const [partialDownload]=await Promise.all([partial.waitForEvent('download'),partial.getByRole('button',{name:'Export GeoJSON',exact:true}).click()]);
+    const partialGeo=JSON.parse(fs.readFileSync(await partialDownload.path(),'utf8'));
+    assert.equal(partialGeo.features.length,205);assert.ok(partialGeo.features.every(f=>f.properties.excludedFootprints===0),'display rejection does not change calculation exclusions');
+    await partial.evaluate(()=>window.__test.rejectFeatures([]));
+    await partial.getByLabel('Fill opacity',{exact:true}).fill('25');
+    await partial.waitForFunction(()=>window.__test.features().length===205);
+    assert.equal(await partial.locator('.notice').filter({hasText:'boundary polygons could not be displayed'}).count(),0,'successful restyle clears display warning');
+    await partial.evaluate(()=>window.__test.rejectFeatures(['boundary-9']));
+    await partial.getByLabel('Boundary color',{exact:true}).fill('#223344');
+    await partial.evaluate(()=>window.__test.rejectFeatures([]));
+    await partial.getByLabel('Work type',{exact:true}).selectOption('addition');
+    await partial.getByLabel('Object',{exact:true}).selectOption('node');
+    await partial.waitForFunction(()=>window.__test.features().length===0);
+    assert.equal(await partial.locator('.notice').filter({hasText:'boundary polygons could not be displayed'}).count(),0,'empty redraw clears display warning');
+    await partial.close();
 
     const globalOnly=await scenario();
     await globalOnly.evaluate(()=>{window.__test.edit();window.__test.edit();window.__test.save(1,{objectEvent:false,delayedClean:true})});

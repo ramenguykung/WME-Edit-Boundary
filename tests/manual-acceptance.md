@@ -4,6 +4,18 @@ The automated tests exercise geometry, evidence reconciliation and backup data w
 
 Use a test area and only make legitimate map edits. Keep WME production and beta results separate. Record the browser, Tampermonkey version, SDK version, date, object category and actual event sequence with each result.
 
+## Version 1.0.1 boundary validation regression
+
+The supplied history reproduces a geometry validation failure at polygon index 3 with 300-metre tiles and all filters cleared. Automated replay against the WME bundle from the reported stack trace now accepts all six polygons, preserves all 204 cells, and retains the touching hole. The same replay accepts all nine polygons / 685 cells at 100 metres; all ten polygons / 1,444 cells at 50 metres remain unchanged. The regression fixture contains only 33 normalized cells from the failing polygon, without the complete history backup.
+
+1. Update the existing Tampermonkey script to version 1.0.1. With no unfinished WME edits, reload the editor.
+2. Set the tile size to 300 metres and clear every history filter. Confirm the six computed polygons render without the previous `features[3].geometry` error. For the supplied history, the panel should show 204 covered tiles and the same 256 saved records.
+3. Confirm the formerly self-touching outline retains its unworked hole. Change color and opacity; the boundary should remain visible without a new validation error.
+4. Check 100-metre and 50-metre tiles, then return to 300 metres. Confirm no boundary validation warnings appear.
+5. Verify rejection isolation only in the synthetic browser fixture: a rejected polygon must not suppress accepted areas or subsequent batches; a successful redraw clears its warning. Display rejections must not increment GeoJSON `excludedFootprints`.
+
+Live post-update status: pending. The original rejection was observed in WME, but browser security policy blocked access to the installed userscript manager during this run. Unit, syntax, type and browser smoke checks passed; this is separate from verifying the updated userscript in live WME.
+
 ## Version 0.2.0 release gate
 
 Automated results and live results must be recorded separately. The local simulated SDK renders SVG polygons and exercises IndexedDB, but cannot establish actual WME event ordering or map-layer acceptance.

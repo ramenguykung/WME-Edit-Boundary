@@ -43,6 +43,8 @@ Actions share a stable work-group ID until their outcome is saved, undone, or in
 
 The grid uses Web Mercator. Its nominal cell width differs from ground distance by latitude; the panel gives an approximate local ground size. Full lines and polygons are intersected with the grid, and adjacent cells merge into outlines while disconnected areas and holes remain separate. Changing tile size rebuilds outlines from retained geometry.
 
+Tile boundaries that touch at a corner are split into simple rings before drawing, including holes that touch their surrounding boundary. If WME rejects an individual polygon, accepted areas remain visible and the panel reports the omitted polygons. The browser console includes each rejected geometry and the tile size, filters, and render generation that produced it. The covered-tile count and GeoJSON export describe the computed boundary; display rejections do not change saved history or exported footprint exclusions.
+
 ## Coverage and limitations
 
 The panel's capability matrix is the current support reference. These workflows require real WME validation before being described as fully supported:
