@@ -192,6 +192,54 @@ test("reconciliation after a partial undo can confirm an object that still diffe
   assert.equal(saved[0].objectId, "102");
 });
 
+test("undo settles a missing negative-ID creation without allowing late callbacks to revive it", () => {
+  const { recorder, saved, updates } = setup();
+  const created = snapshot({ objectId: -1, isNew: true, baselineFingerprint: undefined, baselineGeometry: null });
+  const token = recorder.observe(created);
+  recorder.undo();
+  const undoRevision = recorder.pending.get("segments:-1").revision;
+  assert.equal(recorder.reconcileMissingCreation("segments", -1, undoRevision - 1), false, "stale undo evidence is rejected");
+  assert.equal(recorder.reconcileMissingCreation("segments", -1, undoRevision), true);
+  assert.equal(recorder.pending.size, 0);
+  assert.equal(updates.at(-1).state, "undone");
+  assert.equal(updates.at(-1).candidate, null);
+  assert.equal(recorder.resolve(token, finalGeometry, "late lookup"), false);
+  assert.equal(recorder.saved("segments", -1, created), false);
+  assert.equal(saved.length, 0);
+});
+
+test("missing existing or remapped objects are not classified as undone creations", () => {
+  const existing = setup();
+  existing.recorder.observe(snapshot());
+  existing.recorder.undo();
+  assert.equal(existing.recorder.reconcileMissingCreation("segments", 101, existing.recorder.pending.get("segments:101").revision), false);
+  assert.equal(existing.recorder.pending.get("segments:101").uncertain, true);
+
+  const remapped = setup();
+  remapped.recorder.observe(snapshot({ objectId: -1, isNew: true, baselineFingerprint: undefined, baselineGeometry: null }));
+  remapped.recorder.remap("segments", -1, 501);
+  remapped.recorder.undo();
+  assert.equal(remapped.recorder.reconcileMissingCreation("segments", 501, remapped.recorder.pending.get("segments:501").revision), false);
+  assert.equal(remapped.recorder.pending.get("segments:501").uncertain, true);
+});
+
+test("redo after a missing creation undo starts a new group that can be saved", () => {
+  const { recorder, activityGroups, saved, updates } = setup();
+  const created = snapshot({ objectId: -1, isNew: true, baselineFingerprint: undefined, baselineGeometry: null });
+  recorder.observe(created);
+  recorder.undo();
+  const undoRevision = recorder.pending.get("segments:-1").revision;
+  assert.equal(recorder.reconcileMissingCreation("segments", -1, undoRevision), true);
+  recorder.observe(created);
+  recorder.remap("segments", -1, 501);
+  assert.equal(recorder.saved("segments", 501, snapshot({ objectId: 501, isNew: false })), true);
+  assert.equal(activityGroups.length, 2);
+  assert.notEqual(activityGroups[0].id, activityGroups[1].id);
+  assert.equal(updates.find(group => group.id === activityGroups[0].id && group.state === "undone")?.candidate, null);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].operation, "addition");
+});
+
 test("a delayed location lookup cannot overwrite a more recent observation", () => {
   const { recorder, saved } = setup();
   const obsolete = recorder.observe(snapshot({ geometry: null, locationSource: "unresolved" }));

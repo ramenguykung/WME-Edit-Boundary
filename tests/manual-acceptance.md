@@ -51,6 +51,8 @@ For each supported category, check addition, attribute change, movement where ap
 | Edit a road whose line crosses many tiles | All intersected tiles are included, including cells between the line's vertices. |
 | Save an edit at location A after panning to distant location B | Only the edited geometry at A contributes coverage. |
 | Change several objects, undo part of the work, and save | Reconcile undo before confirmation; uncertain observations are excluded from the successful-save fallback. |
+| Draw a new road segment, undo it, then reload WME | The segment has one Undone outcome, no pending or Interrupted/unconfirmed outcome, and no saved boundary. Repeat while another unsaved edit remains. |
+| Redo that new segment and save it | The original group remains Undone and the restored segment produces exactly one confirmed addition after its temporary ID is remapped. |
 | Add an object, change it, then save | The saved result is an addition while observed changes remain distinguishable. |
 | Add and delete an object before saving | Observed activity may remain; no persisted addition or deletion footprint is invented. |
 | Save an addition, then delete and save the same object | Confirmed addition and deletion remain separate outcomes. |

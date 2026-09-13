@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Edited Boundary
 // @namespace    wme-edited-boundary
-// @version      1.0.1
+// @version      1.0.2
 // @description  Automatically outlines confirmed saved editing work, with local history and portable backups.
 // @author       Ramenguykung
 // @match        https://www.waze.com/editor*
@@ -13,6 +13,8 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @history      1.0.2 Fix pending segments persist after undoing creation.
+// @history      1.0.1 Fix geometry validation failure where self-touching rings will produce the error in some tile settings.
 // ==/UserScript==
 
 // @ts-check
@@ -29,6 +31,7 @@
  * @typedef {{size:number, visible:boolean, color:string, opacity:number}} Settings
  * @typedef {{format:'wme-edited-boundary',version:1|2,exportedAt:string,settings:Settings,sessions:Session[],records:Entry[],groups?:WorkGroup[],provenance?:{recordId:string,importedAt:string}[]}} Backup
  * @typedef {{model:string,objectType:string,objectId:string|number,geometry:Geometry|null,isNew:boolean,isDeleted:boolean,fingerprint:string,locationSource:string,baselineFingerprint?:string,baselineGeometry?:Geometry|null,classificationKnown?:boolean}} Snapshot
+ * @typedef {{status:'present',snapshot:Snapshot}|{status:'absent'|'error',snapshot:null}} SnapshotRead
  * @typedef {{key:string,revision:number}} Token
  * @typedef {{groupId:string,snapshot:Snapshot, revision:number, uncertain:boolean, baselineFingerprint:string|undefined, beforeGeometry:Geometry|null, wasNew:boolean}} Candidate
  * @typedef {{id:string,sessionId:string,context:Context,model:string,objectType:string,objectId:string,aliases:string[],state:'pending'|'saved'|'undone'|'interrupted',createdAt:string,updatedAt:string,actionIds:string[],savedRecordId:string|null,message:string,candidate:Candidate|null}} WorkGroup
@@ -491,6 +494,17 @@
       if (snapshot.classificationKnown===false) { this.publish(c,'Undo result cannot be established.');return; }
       c.snapshot=structuredClone(snapshot); c.uncertain=false; c.revision=++this.revision;
       this.publish(c,'');
+    }
+    /** Resolve an undo that removed an unsaved creation from the data model.
+     * @param {string} model @param {string|number} id @param {number} expectedRevision @returns {boolean}
+     */
+    reconcileMissingCreation(model,id,expectedRevision) {
+      const key=this.key(model,id);
+      const c=this.pending.get(key);
+      const numericId=Number(c?.snapshot.objectId);
+      if (!c || !c.uncertain || c.revision!==expectedRevision || !c.wasNew || !Number.isInteger(numericId) || numericId>=0) return false;
+      this.finishWithoutSave(key,c,'undone','New object creation was undone before saving.');
+      return true;
     }
     /** @param {string} model @param {string|number} id @param {Snapshot} [snapshot] @param {number} [expectedRevision] @returns {boolean} */
     saved(model,id,snapshot,expectedRevision) {
@@ -1048,6 +1062,8 @@
     const mainSaveModels=new Set(['segments','nodes','venues','mapComments','bigJunctions']);
     /** @type {Map<string,{model:string,id:string|number,final:Snapshot|null,revision:number|undefined}>} */
     const objectConfirmations=new Map();
+    /** Keys for absent unsaved creations already settled by undo. */
+    const undoneMissingCreations=new Set();
 
     /** Strip host metadata from the comparison without changing the host object. @param {Record<string,unknown>} raw */
     function fingerprint(raw) {
@@ -1055,11 +1071,12 @@
       for(const k of ['id','oldId','modificationData','createdBy','createdOn','updatedBy','updatedOn','isSelected','isDeleted','isUnchanged'])delete copy[k];
       return stable(copy);
     }
-    /** Read direct or documented related geometry and retain a serializable snapshot. @param {Reader} reader @param {string|number} id @param {unknown} [supplied] @returns {Snapshot|null} */
-    function snapshot(reader,id,supplied) {
+    /** Read direct or documented related geometry while distinguishing absence from failure. @param {Reader} reader @param {string|number} id @param {unknown} [supplied] @returns {SnapshotRead} */
+    function readSnapshot(reader,id,supplied) {
       try {
         const raw=supplied===undefined?reader.read(id):supplied;
-        if(!object(raw))return null;
+        if(raw===null)return {status:'absent',snapshot:null};
+        if(!object(raw))return {status:'error',snapshot:null};
         /** @type {Geometry|null} */
         let geometry=reader.geographic&&validGeometry(raw.geometry)?structuredClone(raw.geometry):null;
         let source=geometry?'direct':'unlocated';
@@ -1070,8 +1087,12 @@
         }
         let isNew=false,isDeleted=false;
         if(reader.model){isNew=sdk.DataModel.isNew({dataModelName:reader.model,objectId:id});isDeleted=sdk.DataModel.isDeleted({dataModelName:reader.model,objectId:id});}
-        return {model:reader.model||reader.type,objectType:reader.type,objectId:id,geometry,isNew,isDeleted,fingerprint:fingerprint(raw),locationSource:source};
-      }catch(error){console.debug('[Edited Boundary] Snapshot unavailable',reader.type,id,error);return null;}
+        return {status:'present',snapshot:{model:reader.model||reader.type,objectType:reader.type,objectId:id,geometry,isNew,isDeleted,fingerprint:fingerprint(raw),locationSource:source}};
+      }catch(error){console.debug('[Edited Boundary] Snapshot unavailable',reader.type,id,error);return {status:'error',snapshot:null};}
+    }
+    /** @param {Reader} reader @param {string|number} id @param {unknown} [supplied] @returns {Snapshot|null} */
+    function snapshot(reader,id,supplied) {
+      return readSnapshot(reader,id,supplied).snapshot;
     }
     /** Cache only unchanged objects; pending candidates pin their own prior snapshots. */
     function seedCache() {
@@ -1107,7 +1128,12 @@
         const model=reader?.model||affected.objectType;
         const key=recorder.key(model,affected.objectId);
         const baseline=cache.get(key);
-        const s=reader?snapshot(reader,affected.objectId):null;
+        const read=reader?readSnapshot(reader,affected.objectId):null;
+        const s=read?.snapshot||null;
+        if(undoneMissingCreations.has(key)){
+          if(read?.status==='present')undoneMissingCreations.delete(key);
+          else {if(read?.status==='error')gap(`${affected.objectType}: restored object could not be read after undo.`);continue;}
+        }
         if(!reader||!reader.model||!tracked.has(reader.model)){
           const activity=recorder.entry(s||{model,objectType:affected.objectType,objectId:affected.objectId,geometry:null,isNew:false,isDeleted:false,fingerprint:'',locationSource:'unlocated'},'activity','unknown','confirmation unavailable',s?.geometry||null,null);
           append(activity);gap(`${affected.objectType}: passive save confirmation is unavailable.`);continue;
@@ -1345,7 +1371,13 @@
     cleanups.push(sdk.Events.on({eventName:'wme-after-undo',eventHandler:()=>{
       if(!ready)return;objectConfirmations.clear();recorder.undo();
       append(recorder.entry({model:'editor',objectType:'editor',objectId:'',geometry:null,isNew:false,isDeleted:false,fingerprint:'',locationSource:'unlocated'},'activity','undo','affected objects unavailable',null,null));
-      for(const c of Array.from(recorder.pending.values())){const r=byModel.get(c.snapshot.model);if(!r)continue;const s=snapshot(r,c.snapshot.objectId);if(s)recorder.reconcile(s);else gap(`${r.type}: undo result cannot be attributed.`);}
+      for(const c of Array.from(recorder.pending.values())){
+        const r=byModel.get(c.snapshot.model);if(!r)continue;
+        const key=recorder.key(c.snapshot.model,c.snapshot.objectId);const revision=c.revision;const read=readSnapshot(r,c.snapshot.objectId);
+        if(read.status==='present')recorder.reconcile(read.snapshot);
+        else if(read.status==='absent'&&recorder.reconcileMissingCreation(c.snapshot.model,c.snapshot.objectId,revision))undoneMissingCreations.add(key);
+        else gap(`${r.type}: undo result cannot be attributed.`);
+      }
       drawStatus();
     }}));
     cleanups.push(sdk.Events.on({eventName:'wme-no-edits',eventHandler:()=>{mayArm();reconcileSave();drawStatus();}}));
@@ -1370,7 +1402,7 @@
     }
     /** @param {'logout'|'pagehide'} reason */
     function end(reason){
-      if(closed)return;closed=true;ready=false;objectConfirmations.clear();session.endedAt=new Date().toISOString();session.status='ended';
+      if(closed)return;closed=true;ready=false;objectConfirmations.clear();undoneMissingCreations.clear();session.endedAt=new Date().toISOString();session.status='ended';
       if(recorder.pending.size)session.gaps.push('Session ended with unconfirmed observations.');
       recorder.setArmed(false);queue(()=>store.put('sessions',[session]));cleanups.forEach(clean=>clean());
       for(const reader of readers)if(reader.model&&tracked.has(reader.model))try{sdk.Events.stopDataModelEventsTracking({dataModelName:reader.model});}catch{}

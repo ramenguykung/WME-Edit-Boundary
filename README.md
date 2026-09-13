@@ -37,7 +37,7 @@ Missing names and addresses do not block location recording. Geometry from the a
 
 An edit without sufficient location evidence remains in history without a guessed footprint. The current viewport, cursor, and selection do not establish where an edit happened.
 
-Observed activity and confirmed saved outcomes are separate records. Undo does not provide affected object IDs, so pending objects require reconciliation. Saving an object does not establish that each previous action on that object survived undo. Suggestions remain distinct from applied map edits.
+Observed activity and confirmed saved outcomes are separate records. Undo does not provide affected object IDs, so pending objects require reconciliation. A tracked unsaved creation that disappears from the data model during undo is recorded as Undone when its negative temporary ID and exact pending revision still match. Saving an object does not establish that each previous action on that object survived undo. Suggestions remain distinct from applied map edits.
 
 Actions share a stable work-group ID until their outcome is saved, undone, or interrupted. A subsequent edit after saving starts a new group. History displays the current group outcome without rewriting the original activity log. Status filters history only; the other filters select both history and saved boundary records.
 

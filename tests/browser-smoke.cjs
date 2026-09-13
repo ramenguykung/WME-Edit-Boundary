@@ -19,6 +19,7 @@ const original = {id:1,geometry:{type:'LineString',coordinates:[[100.5001,13.700
 models.set('segments', new Map([[1,original]]));
 let unsaved = location.search.includes('dirty')?1:0, redo = 0, savingMode = 'IDLE', edits=0, rejectSavedWrites=false;
 const newIds = new Set(), deletedIds = new Set();
+const readFailures = new Set();
 const features = new Map();
 const rejectedFeatures = new Set(), rejectionDiagnostics = [];
 const originalConsoleError=console.error;
@@ -58,7 +59,7 @@ const sdk = {
 sdk.DataModel={isNew:({dataModelName,objectId})=>newIds.has(dataModelName+':'+objectId),isDeleted:({dataModelName,objectId})=>deletedIds.has(dataModelName+':'+objectId)};
 for (const [moduleName,modelName] of Object.entries({Segments:'segments',Nodes:'nodes',Venues:'venues',MapComments:'mapComments',BigJunctions:'bigJunctions',RoadClosures:'roadClosures',MapUpdateRequests:'mapUpdateRequests',MapProblems:'mapProblems',Cities:'cities',Streets:'streets',Countries:'countries',States:'states',MajorTrafficEvents:'majorTrafficEvents',SegmentSuggestions:'segmentSuggestions',TurnClosures:'turnClosures',PermanentHazards:'permanentHazards',RestrictedDrivingAreas:'restrictedDrivingAreas'})) {
  if(!models.has(modelName))models.set(modelName,new Map());
- sdk.DataModel[moduleName]={getAll:()=>Array.from(models.get(modelName).values()),getById:args=>models.get(modelName).get(Object.values(args)[0])||null};
+ sdk.DataModel[moduleName]={getAll:()=>Array.from(models.get(modelName).values()),getById:args=>{const id=Object.values(args)[0];if(readFailures.has(modelName+':'+id))throw new Error('Injected read failure');return models.get(modelName).get(id)||null}};
 }
 sdk.DataModel.Segments.findSegment=async()=>({id:99,geometry:{type:'LineString',coordinates:[[100.52,13.7],[100.525,13.7]]}});
 const emit=(name,payload)=>{for(const handler of listeners.get(name)||[])handler(payload)};
@@ -67,7 +68,10 @@ window.__test={
  save(id=1,options={}){const obj=models.get('segments').get(id);if(obj)obj.length=1000+edits;newIds.delete('segments:'+id);if(!options.delayedClean){unsaved=0;redo=0;savingMode='IDLE';}if(options.objectEvent!==false)emit('wme-data-model-objects-saved',{dataModelName:'segments',objectIds:[id]});emit('wme-save-finished',{success:true});if(!options.delayedClean)emit('wme-no-edits')},
  clean(){unsaved=0;redo=0;savingMode='IDLE';emit('wme-no-edits')},
  add(id=-1){models.get('segments').set(id,{...structuredClone(original),id,name:'New'});newIds.add('segments:'+id);this.edit(id)},
+ undoNew(id=-1,afterEdit='none'){models.get('segments').delete(id);newIds.delete('segments:'+id);unsaved=Math.max(0,unsaved-1);redo++;const notify=()=>emit('wme-after-edit',{affectedObjects:[{objectType:'segment',objectId:id}]});if(afterEdit==='before')notify();emit('wme-after-undo');if(afterEdit==='after')notify();if(unsaved===0)emit('wme-no-edits')},
+ redoNew(id=-1){models.get('segments').set(id,{...structuredClone(original),id,name:'New'});newIds.add('segments:'+id);unsaved++;redo=Math.max(0,redo-1);savingMode='EDITING';emit('wme-after-edit',{affectedObjects:[{objectType:'segment',objectId:id}]})},
  remap(oldID,newID,savedFirst=false){const obj=models.get('segments').get(oldID);models.get('segments').delete(oldID);obj.id=newID;models.get('segments').set(newID,obj);newIds.delete('segments:'+oldID);if(savedFirst)emit('wme-data-model-objects-saved',{dataModelName:'segments',objectIds:[newID]});emit('wme-data-model-object-changed-id',{dataModelName:'segments',objectIds:{oldID,newID}})},
+ failRead(id,value=true){const key='segments:'+id;if(value)readFailures.add(key);else readFailures.delete(key)},
  failWrites(value){rejectSavedWrites=value},
  fail(){emit('wme-save-finished',{success:false})},
  features:()=>Array.from(features.values()),
@@ -252,6 +256,38 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     const remapGroup=await remapped.evaluate(async()=>(await window.__test.records('groups'))[0]);
     assert.deepEqual(remapGroup.aliases,['-1','501']);assert.equal(remapGroup.objectId,'501');
     await remapped.close();
+
+    for(const afterEdit of ['none','before','after']){
+      const undone=await scenario();
+      await undone.evaluate(order=>{window.__test.add(-1);window.__test.undoNew(-1,order)},afterEdit);
+      await undone.waitForFunction(async()=>(await window.__test.records('groups')).some(g=>g.objectId==='-1'&&g.state==='undone'));
+      assert.equal(await undone.evaluate(async()=>(await window.__test.records('groups')).filter(g=>g.state==='pending').length),0,`undo with ${afterEdit} after-edit ordering must not remain pending`);
+      assert.equal(await undone.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),0,'undone creation must not produce saved coverage');
+      assert.equal(await undone.evaluate(()=>window.__test.features().length),0,'undone creation must not render a boundary');
+      await undone.reload();await undone.getByText('Tracking automatically',{exact:true}).waitFor();
+      assert.equal(await undone.evaluate(async()=>(await window.__test.records('groups')).filter(g=>g.objectId==='-1'&&g.state==='undone').length),1,'reload preserves the undone outcome');
+      assert.equal(await undone.locator('.record[data-state=interrupted]').count(),0,'reload does not turn an undone creation into unconfirmed history');
+      await undone.close();
+    }
+
+    const partialUndo=await scenario();
+    await partialUndo.evaluate(()=>{window.__test.edit(1);window.__test.add(-1);window.__test.undoNew(-1,'after')});
+    await partialUndo.waitForFunction(async()=>{const groups=await window.__test.records('groups');return groups.some(g=>g.objectId==='-1'&&g.state==='undone')&&groups.some(g=>g.objectId==='1'&&g.state==='pending')});
+    await partialUndo.evaluate(()=>window.__test.save(1));await savedCount(partialUndo,1);
+    assert.deepEqual(await partialUndo.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').map(r=>r.objectId)),['1'],'partial undo saves only the remaining edit');
+    await partialUndo.close();
+
+    const redone=await scenario();
+    await redone.evaluate(()=>{window.__test.add(-1);window.__test.undoNew(-1,'after');window.__test.redoNew(-1);window.__test.remap(-1,502);window.__test.save(502)});await savedCount(redone,1);
+    const redoneGroups=await redone.evaluate(async()=>(await window.__test.records('groups')).map(g=>({objectId:g.objectId,state:g.state})).sort((a,b)=>Number(a.objectId)-Number(b.objectId)));
+    assert.deepEqual(redoneGroups,[{objectId:'-1',state:'undone'},{objectId:'502',state:'saved'}]);
+    await redone.close();
+
+    const failedUndoRead=await scenario();
+    await failedUndoRead.evaluate(()=>{window.__test.add(-1);window.__test.failRead(-1);window.__test.undoNew(-1)});
+    await failedUndoRead.waitForFunction(async()=>(await window.__test.records('groups')).some(g=>g.objectId==='-1'&&g.state==='pending'&&g.candidate?.uncertain));
+    assert.equal(await failedUndoRead.locator('.record[data-state=undone]').count(),0,'read failures remain uncertain rather than proving undo');
+    await failedUndoRead.close();
 
     const interrupted=await scenario();
     await interrupted.evaluate(()=>window.__test.edit());
