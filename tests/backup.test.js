@@ -12,7 +12,7 @@ function fixture() {
     format: "wme-edited-boundary",
     version: 1,
     exportedAt: at,
-    settings: { size: 300, visible: true, color: "#12aabb", opacity: 0.13 },
+    settings: { size: 300, visible: true, color: "#12aabb", opacity: 0.13, borderOpacity: 0.74 },
     sessions: [{ id: "session-a", context, startedAt: at, endedAt: null, status: "interrupted", gaps: ["An object location was unavailable."] }],
     records: [{
       id: "record-a",
@@ -59,7 +59,26 @@ test("older backups receive default appearance settings", () => {
   const backup = fixture();
   delete backup.settings.color;
   delete backup.settings.opacity;
-  assert.deepEqual(validateBackup(backup).settings, { size: 300, visible: true, color: "#12aabb", opacity: 0.13 });
+  delete backup.settings.borderOpacity;
+  assert.deepEqual(validateBackup(backup).settings, { size: 300, visible: true, color: "#12aabb", opacity: 0.13, borderOpacity: 1 });
+});
+
+test("backups without border opacity retain their existing fill opacity", () => {
+  const backup = fixture();
+  backup.settings.opacity = 0;
+  delete backup.settings.borderOpacity;
+  assert.deepEqual(validateBackup(backup).settings, { size: 300, visible: true, color: "#12aabb", opacity: 0, borderOpacity: 1 });
+  assert.equal(Object.hasOwn(backup.settings, "borderOpacity"), false, "normalization does not mutate the imported backup");
+});
+
+test("fill and border opacity independently round trip at both endpoints", () => {
+  for (const opacity of [0, 1]) {
+    for (const borderOpacity of [0, 1]) {
+      const backup = fixture();
+      Object.assign(backup.settings, { opacity, borderOpacity });
+      assert.deepEqual(validateBackup(JSON.parse(JSON.stringify(backup))).settings, backup.settings);
+    }
+  }
 });
 
 test("importing the same records twice is idempotent", () => {
@@ -208,10 +227,12 @@ test("invalid tile settings are rejected before importing history", () => {
     invalid.settings.color = color;
     assert.throws(() => validateBackup(invalid), /settings/i);
   }
-  for (const opacity of [-0.01, 1.01, "0.5", NaN, Infinity]) {
-    const invalid = fixture();
-    invalid.settings.opacity = opacity;
-    assert.throws(() => validateBackup(invalid), /settings/i);
+  for (const key of ["opacity", "borderOpacity"]) {
+    for (const opacity of [-0.01, 1.01, "0.5", null, true, NaN, Infinity]) {
+      const invalid = fixture();
+      invalid.settings[key] = opacity;
+      assert.throws(() => validateBackup(invalid), /settings/i, `${key} rejects ${String(opacity)}`);
+    }
   }
 });
 

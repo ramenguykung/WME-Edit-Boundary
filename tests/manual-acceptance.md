@@ -4,6 +4,13 @@ The automated tests exercise geometry, evidence reconciliation and backup data w
 
 Use a test area and only make legitimate map edits. Keep WME production and beta results separate. Record the browser, Tampermonkey version, SDK version, date, object category and actual event sequence with each result.
 
+## Boundary appearance
+
+1. With a saved boundary visible, confirm Boundary color has separate Fill opacity and Border opacity sliders with percentage values. Existing settings retain their fill opacity and start with 100% border opacity.
+2. Set fill to 0% and border to 100%: only the outline should remain. Set fill to 100% and border to 0%: only the filled area should remain. Adjust each slider independently and confirm the other value stays unchanged.
+3. Change the color with both opacities above 0%. Confirm the fill and border use that color at their chosen opacities. Hide the boundary, adjust both sliders, and show it again; it should stay hidden until shown.
+4. Reload and confirm both opacity values persist. Export a JSON backup, change both values, then import with display settings restoration enabled. Confirm the controls and map return to the exported appearance.
+
 ## Version 1.0.1 boundary validation regression
 
 The supplied history reproduces a geometry validation failure at polygon index 3 with 300-metre tiles and all filters cleared. Automated replay against the WME bundle from the reported stack trace now accepts all six polygons, preserves all 204 cells, and retains the touching hole. The same replay accepts all nine polygons / 685 cells at 100 metres; all ten polygons / 1,444 cells at 50 metres remain unchanged. The regression fixture contains only 33 normalized cells from the failing polygon, without the complete history backup.

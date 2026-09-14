@@ -35,7 +35,7 @@ function addMapFeatures(rows){
  }
  drawMap();
 }
-let layerStyle = {fillColor:'#12aabb',fillOpacity:.13,strokeColor:'#12aabb',strokeWidth:2};
+let layerStyle = {fillColor:'#12aabb',fillOpacity:.13,strokeColor:'#12aabb',strokeOpacity:1,strokeWidth:2};
 const originalPut=IDBObjectStore.prototype.put;
 IDBObjectStore.prototype.put=function(value,...args){const request=originalPut.call(this,value,...args);if(rejectSavedWrites&&this.name==='groups'&&value.state==='saved')this.transaction.abort();return request;};
 function drawMap(){
@@ -45,7 +45,7 @@ function drawMap(){
  for(const feature of features.values()){
   const shape=document.createElementNS(svg.namespaceURI,'path');
   shape.setAttribute('d',feature.geometry.coordinates.map(ring=>ring.map(([lon,lat],i)=>(i?'L':'M')+((lon-100.49)*16000)+','+(400-(lat-13.69)*20000)).join(' ')+' Z').join(' '));
-  shape.setAttribute('fill',layerStyle.fillColor);shape.setAttribute('fill-opacity',String(layerStyle.fillOpacity));shape.setAttribute('fill-rule','evenodd');shape.setAttribute('stroke',layerStyle.strokeColor);shape.setAttribute('stroke-width',String(layerStyle.strokeWidth));svg.append(shape);
+  shape.setAttribute('fill',layerStyle.fillColor);shape.setAttribute('fill-opacity',String(layerStyle.fillOpacity));shape.setAttribute('fill-rule','evenodd');shape.setAttribute('stroke',layerStyle.strokeColor);shape.setAttribute('stroke-opacity',String(layerStyle.strokeOpacity));shape.setAttribute('stroke-width',String(layerStyle.strokeWidth));svg.append(shape);
  }
 }
 const sdk = {
@@ -111,13 +111,32 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     assert.equal(await page.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),1);
     assert.equal(await page.locator('.record[data-state=saved]').count(),1);
     assert.equal(await page.locator('#map svg path').count()>0,true);
-    const colorControl=page.getByLabel('Boundary color',{exact:true});const opacityControl=page.getByLabel('Fill opacity',{exact:true});
-    assert.equal(await colorControl.inputValue(),'#12aabb');assert.equal(await opacityControl.inputValue(),'13');
+    const colorControl=page.getByLabel('Boundary color',{exact:true});const opacityControl=page.getByLabel('Fill opacity',{exact:true});const borderOpacityControl=page.getByLabel('Border opacity',{exact:true});
+    assert.equal(await colorControl.inputValue(),'#12aabb');assert.equal(await opacityControl.inputValue(),'13');assert.equal(await borderOpacityControl.inputValue(),'100');
+    assert.equal(await page.locator('.opacity-controls').evaluate(container=>{
+      const bounds=container.getBoundingClientRect();
+      return [...container.querySelectorAll('input,output')].every(control=>{
+        const rect=control.getBoundingClientRect();return rect.left>=bounds.left&&rect.right<=bounds.right;
+      });
+    }),true,'both opacity sliders and percentage readouts fit the sidebar');
+    for(const control of [opacityControl,borderOpacityControl]){
+      assert.equal(await control.getAttribute('min'),'0');assert.equal(await control.getAttribute('max'),'100');
+    }
+    const assertOpacity=async(fill,border)=>{
+      assert.equal(await page.locator('#map svg path').first().getAttribute('fill-opacity'),String(fill));
+      assert.equal(await page.locator('#map svg path').first().getAttribute('stroke-opacity'),String(border));
+    };
     await colorControl.fill('#cc3366');await opacityControl.fill('42');
     assert.equal(await page.locator('#map svg path').first().getAttribute('fill'),'#cc3366');
     assert.equal(await page.locator('#map svg path').first().getAttribute('stroke'),'#cc3366');
-    assert.equal(await page.locator('#map svg path').first().getAttribute('fill-opacity'),'0.42');
-    assert.equal(await page.locator('.range-row output').textContent(),'42%');
+    await assertOpacity(.42,1);
+    await borderOpacityControl.fill('67');await assertOpacity(.42,.67);
+    await opacityControl.fill('0');await assertOpacity(0,.67);
+    await borderOpacityControl.fill('0');await assertOpacity(0,0);
+    await opacityControl.fill('100');await assertOpacity(1,0);
+    await borderOpacityControl.fill('100');await assertOpacity(1,1);
+    await opacityControl.fill('42');await borderOpacityControl.fill('67');await assertOpacity(.42,.67);
+    assert.deepEqual(await page.locator('.range-row output').allTextContents(),['42%','67%']);
     await page.getByRole('checkbox',{name:'Show boundary',exact:true}).uncheck();
     await page.evaluate(()=>{window.__test.edit(99)});
     await page.waitForTimeout(250);
@@ -134,10 +153,16 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     const backup=JSON.parse(fs.readFileSync(await download.path(),'utf8'));
     assert.equal(backup.records.filter(r=>r.kind==='saved').length,2);
     assert.equal(backup.version,2);assert.equal(backup.groups.length,2);assert.ok(backup.groups.every(g=>g.candidate===null));
-    assert.deepEqual(backup.settings,{size:150,visible:true,color:'#cc3366',opacity:.42});
+    assert.deepEqual(backup.settings,{size:150,visible:true,color:'#cc3366',opacity:.42,borderOpacity:.67});
     const count=backup.records.length;
+    await colorControl.fill('#112233');await opacityControl.fill('8');await borderOpacityControl.fill('19');
+    await page.getByRole('checkbox',{name:'Restore display settings when importing',exact:true}).check();
     await page.locator('input[type=file]').setInputFiles({name:'backup.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(backup))});
-    await page.waitForTimeout(350);
+    await page.waitForFunction(()=>document.querySelector('input[aria-label="Fill opacity"]').value==='42'&&document.querySelector('input[aria-label="Border opacity"]').value==='67');
+    await page.waitForFunction(()=>window.__test.features().length>0);
+    assert.equal(await colorControl.inputValue(),'#cc3366');await assertOpacity(.42,.67);
+    assert.deepEqual(await page.locator('.range-row output').allTextContents(),['42%','67%'],'import restores both opacity controls and readouts');
+    await page.getByRole('checkbox',{name:'Restore display settings when importing',exact:true}).uncheck();
     assert.equal(await page.evaluate(async()=>(await window.__test.records()).length),count,'reimport is idempotent');
     const incoming=structuredClone(backup);
     incoming.sessions=incoming.sessions.map(s=>({...s,id:'imported-'+s.id,status:'ended',endedAt:s.startedAt}));
@@ -161,7 +186,8 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     await page.reload();
     await page.getByText('Tracking automatically',{exact:true}).waitFor();
     await page.waitForFunction(()=>window.__test.features().length>0);
-    assert.equal(await page.getByLabel('Boundary color',{exact:true}).inputValue(),'#cc3366');assert.equal(await page.getByLabel('Fill opacity',{exact:true}).inputValue(),'42');
+    assert.equal(await page.getByLabel('Boundary color',{exact:true}).inputValue(),'#cc3366');assert.equal(await page.getByLabel('Fill opacity',{exact:true}).inputValue(),'42');assert.equal(await page.getByLabel('Border opacity',{exact:true}).inputValue(),'67');
+    await assertOpacity(.42,.67);
     assert.equal(await page.evaluate(async()=>(await window.__test.records()).length),count*2,'history survives reload');
     await page.evaluate(()=>window.__test.emit('wme-logged-out'));
     await page.getByText('Session ended',{exact:true}).waitFor();
@@ -336,10 +362,15 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
 
     const legacy=await browser.newPage();await legacy.goto(base+'/seed');
     const legacyBackup={...structuredClone(backup),version:1};delete legacyBackup.groups;legacyBackup.records.forEach(r=>delete r.groupId);
-    await legacy.evaluate(data=>new Promise((resolve,reject)=>{const r=indexedDB.open('wme-edited-boundary',1);r.onupgradeneeded=()=>{const db=r.result;const records=db.createObjectStore('records',{keyPath:'id'});records.createIndex('sessionId','sessionId');records.createIndex('at','at');db.createObjectStore('sessions',{keyPath:'id'});db.createObjectStore('meta',{keyPath:'id'});};r.onsuccess=()=>{const tx=r.result.transaction(['records','sessions','meta'],'readwrite');data.records.forEach(row=>tx.objectStore('records').put(row));data.sessions.forEach(row=>tx.objectStore('sessions').put(row));tx.objectStore('meta').put({id:'settings',size:150,visible:true});tx.oncomplete=()=>{r.result.close();resolve()};tx.onerror=()=>reject(tx.error);};r.onerror=()=>reject(r.error);}),legacyBackup);
+    await legacy.evaluate(data=>new Promise((resolve,reject)=>{const r=indexedDB.open('wme-edited-boundary',1);r.onupgradeneeded=()=>{const db=r.result;const records=db.createObjectStore('records',{keyPath:'id'});records.createIndex('sessionId','sessionId');records.createIndex('at','at');db.createObjectStore('sessions',{keyPath:'id'});db.createObjectStore('meta',{keyPath:'id'});};r.onsuccess=()=>{const tx=r.result.transaction(['records','sessions','meta'],'readwrite');data.records.forEach(row=>tx.objectStore('records').put(row));data.sessions.forEach(row=>tx.objectStore('sessions').put(row));tx.objectStore('meta').put({id:'settings',size:150,visible:true,color:'#335577',opacity:.29});tx.oncomplete=()=>{r.result.close();resolve()};tx.onerror=()=>reject(tx.error);};r.onerror=()=>reject(r.error);}),legacyBackup);
     await legacy.goto(base+'/editor');await legacy.getByText('Tracking automatically',{exact:true}).waitFor();await legacy.waitForFunction(()=>window.__test.features().length>0);
     assert.equal(await legacy.evaluate(async()=>(await window.__test.records('groups')).length),0,'v1 upgrade does not invent associations');
     assert.equal(await legacy.locator('input[type=number]').inputValue(),'150','v1 settings survive upgrade');
+    assert.equal(await legacy.getByLabel('Boundary color',{exact:true}).inputValue(),'#335577');
+    assert.equal(await legacy.getByLabel('Fill opacity',{exact:true}).inputValue(),'29','old fill opacity survives upgrade');
+    assert.equal(await legacy.getByLabel('Border opacity',{exact:true}).inputValue(),'100','old settings keep a fully opaque border');
+    assert.equal(await legacy.locator('#map svg path').first().getAttribute('fill-opacity'),'0.29');
+    assert.equal(await legacy.locator('#map svg path').first().getAttribute('stroke-opacity'),'1');
     await legacy.close();
 
     const importedPending=await scenario();const unfinished=structuredClone(incoming);
@@ -361,6 +392,6 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     await isolated.close();
     await page.screenshot({path:path.join(__dirname,'browser-smoke.png'),fullPage:true});
     assert.deepEqual(errors,[]);
-    console.log('Browser smoke passed: normalized saves, global/deferred confirmation, revision guards, remaps, grouped history, filter layout, deletion, v2 backup, v1 migration, local write retry, immediate refresh receipts, interrupted work, tab isolation, polygon SVG rendering, reload/relogin, exports and worker fallback. Simulated SDK; live WME acceptance is separate.');
+    console.log('Browser smoke passed: normalized saves, global/deferred confirmation, revision guards, remaps, grouped history, filter layout, deletion, v2 backup, v1 migration, local write retry, immediate refresh receipts, interrupted work, tab isolation, polygon SVG rendering, independent fill/border opacity, appearance restore/reload, reload/relogin, exports and worker fallback. Simulated SDK; live WME acceptance is separate.');
   } finally {if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

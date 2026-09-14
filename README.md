@@ -22,7 +22,7 @@ The panel provides:
 - Tracking status, counts, and coverage limitations.
 - A show/hide checkbox that changes only boundary visibility.
 - Tile size from 50 to 5,000 nominal metres, with 300 metres as the default.
-- A boundary color picker and live fill-opacity slider, saved locally and included in backups.
+- A boundary color picker with separate live fill-opacity and border-opacity sliders, saved locally and included in backups.
 - History with date, object type, operation, source, session, and history-only Status filters directly above the results.
 - One expandable outcome per object per save, containing the original actions and a Pending, Saved, Undone, or Interrupted/unconfirmed label.
 - JSON backup export and import, with optional settings restoration.
@@ -71,7 +71,7 @@ The implementation has these resource and geometry limits:
 
 ## Import and export
 
-**JSON backup version 2** preserves sessions, activity, saved outcomes, group associations, geometry evidence, context, import provenance, and settings, including boundary color and fill opacity. Version 1 backups and backups created before the appearance controls remain accepted with default appearance settings. Live candidate snapshots and recovery receipts stay local and are excluded from portable backups. Import validates the complete file before writing, merges records by stable IDs, skips identical duplicates, and rejects conflicting IDs or unsupported versions. Settings restoration is off by default.
+**JSON backup version 2** preserves sessions, activity, saved outcomes, group associations, geometry evidence, context, import provenance, and settings, including boundary color, fill opacity, and border opacity. Version 1 backups and backups created before the appearance controls remain accepted with default appearance settings. Backups without border opacity retain their fill opacity and default to a fully opaque border. Live candidate snapshots and recovery receipts stay local and are excluded from portable backups. Import validates the complete file before writing, merges records by stable IDs, skips identical duplicates, and rejects conflicting IDs or unsupported versions. Settings restoration is off by default.
 
 Import does not submit WME edits, resume pending work, or independently verify another file's claimed save results. Keep the original editor, region, environment, and timestamps when moving history between browser profiles.
 
