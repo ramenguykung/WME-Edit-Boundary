@@ -65,8 +65,13 @@ sdk.DataModel.Segments.findSegment=async()=>({id:99,geometry:{type:'LineString',
 const emit=(name,payload)=>{for(const handler of listeners.get(name)||[])handler(payload)};
 window.__test={
  edit(id=1){unsaved++;savingMode='EDITING';const obj=models.get('segments').get(id);if(obj)obj.name='Edited '+(++edits);emit('wme-after-edit',{affectedObjects:[{objectType:'segment',objectId:id}]})},
- save(id=1,options={}){const obj=models.get('segments').get(id);if(obj)obj.length=1000+edits;newIds.delete('segments:'+id);if(!options.delayedClean){unsaved=0;redo=0;savingMode='IDLE';}if(options.objectEvent!==false)emit('wme-data-model-objects-saved',{dataModelName:'segments',objectIds:[id]});emit('wme-save-finished',{success:true});if(!options.delayedClean)emit('wme-no-edits')},
+ save(id=1,options={}){const obj=models.get('segments').get(id);if(obj)obj.length=1000+edits;newIds.delete('segments:'+id);if(!options.delayedClean){unsaved=0;redo=0;savingMode='IDLE';}if(options.objectEvent!==false)emit('wme-data-model-objects-saved',{dataModelName:'segments',objectIds:[id]});if(options.globalEvent!==false)emit('wme-save-finished',{success:true});if(!options.delayedClean)emit('wme-no-edits')},
  clean(){unsaved=0;redo=0;savingMode='IDLE';emit('wme-no-edits')},
+ settle(mode='IDLE'){unsaved=0;redo=0;savingMode=mode},
+ mode(saveMode){savingMode=saveMode;emit('wme-save-mode-changed',{saveMode})},
+ select(){emit('wme-selection-changed')},
+ hidePane(detach=false){const pane=document.querySelector('#pane');if(detach)pane.remove();else pane.hidden=true;this.select()},
+ afterEdit(affectedObjects){unsaved++;savingMode='EDITING';emit('wme-after-edit',{affectedObjects})},
  add(id=-1){models.get('segments').set(id,{...structuredClone(original),id,name:'New'});newIds.add('segments:'+id);this.edit(id)},
  undoNew(id=-1,afterEdit='none'){models.get('segments').delete(id);newIds.delete('segments:'+id);unsaved=Math.max(0,unsaved-1);redo++;const notify=()=>emit('wme-after-edit',{affectedObjects:[{objectType:'segment',objectId:id}]});if(afterEdit==='before')notify();emit('wme-after-undo');if(afterEdit==='after')notify();if(unsaved===0)emit('wme-no-edits')},
  redoNew(id=-1){models.get('segments').set(id,{...structuredClone(original),id,name:'New'});newIds.add('segments:'+id);unsaved++;redo=Math.max(0,redo-1);savingMode='EDITING';emit('wme-after-edit',{affectedObjects:[{objectType:'segment',objectId:id}]})},
@@ -209,6 +214,15 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     await fallback.close();
     const scenario=async()=>{const p=await browser.newPage();p.on('pageerror',error=>errors.push(error.message));await p.goto(base+'/editor');await p.getByText('Tracking automatically',{exact:true}).waitFor();return p;};
     const savedCount=(p,n)=>p.waitForFunction(async expected=>(await window.__test.records()).filter(r=>r.kind==='saved').length===expected,n);
+    const waitForOutcome=async(p,savedExpected,pendingExpected=0)=>{
+      let state;
+      for(let attempt=0;attempt<100;attempt++){
+        state=await p.evaluate(async()=>{const records=await window.__test.records(),groups=await window.__test.records('groups');return {saved:records.filter(r=>r.kind==='saved').length,pending:groups.filter(g=>g.state==='pending').length}});
+        if(state.saved===savedExpected&&state.pending===pendingExpected)return state;
+        await p.waitForTimeout(50);
+      }
+      assert.fail(`Timed out waiting for saved=${savedExpected}, pending=${pendingExpected}; received ${JSON.stringify(state)}`);
+    };
 
     const gridTools=createGeometryTools();
     const sampleRecord=backup.records.find(r=>r.kind==='saved');
@@ -276,6 +290,58 @@ window.SDK_INITIALIZED=Promise.resolve();window.getWmeSdk=()=>sdk;
     assert.equal(await globalOnly.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),2,'intervening edit cancels deferred object confirmation');
     await globalOnly.evaluate(()=>window.__test.save());await savedCount(globalOnly,3);
     await globalOnly.close();
+
+    const hiddenPane=await scenario();
+    await hiddenPane.evaluate(()=>{window.__test.edit();window.__test.hidePane(true);window.__test.save(1,{delayedClean:true,globalEvent:false});window.__test.settle()});
+    await waitForOutcome(hiddenPane,1);
+    assert.equal(await hiddenPane.evaluate(async()=>(await window.__test.records('groups')).filter(g=>g.state==='pending').length),0,'object save confirms after counters settle while the pane is detached');
+    await hiddenPane.waitForFunction(()=>window.__test.features().length>0);
+    assert.equal(await hiddenPane.evaluate(()=>window.__test.features().length)>0,true,'detached pane does not block the saved boundary update');
+    await hiddenPane.close();
+
+    const deferredGlobal=await scenario();
+    await deferredGlobal.evaluate(()=>{window.__test.edit();window.__test.save(1,{objectEvent:false,delayedClean:true})});
+    await deferredGlobal.waitForTimeout(600);
+    assert.equal(await deferredGlobal.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),0,'retrying save evidence does not bypass dirty counters');
+    await deferredGlobal.evaluate(()=>window.__test.settle());
+    await waitForOutcome(deferredGlobal,1);
+    await deferredGlobal.close();
+
+    const saveModes=await scenario();
+    await saveModes.evaluate(()=>{window.__test.edit();window.__test.save(1,{objectEvent:false,delayedClean:true});window.__test.mode('EDITING');window.__test.mode('DISALLOWED');window.__test.settle();window.__test.mode('IDLE')});
+    await waitForOutcome(saveModes,1);
+    assert.equal(await saveModes.evaluate(async()=>(await window.__test.records('groups')).filter(g=>g.state==='pending').length),0,'save modes preserve global evidence until counters settle');
+    await saveModes.close();
+
+    const selectionOnly=await scenario();
+    await selectionOnly.evaluate(()=>{window.__test.edit();window.__test.settle();window.__test.select()});
+    await selectionOnly.waitForTimeout(350);
+    assert.equal(await selectionOnly.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),0,'selection and clean counters cannot confirm without save evidence');
+    await selectionOnly.close();
+
+    for(const affectedObjects of [[],[{objectType:'segment',objectId:null}],[{objectType:'turn',objectId:44}]]){
+      const intervening=await scenario();
+      await intervening.evaluate(()=>{window.__test.edit();window.__test.save(1,{objectEvent:false,delayedClean:true})});
+      await intervening.evaluate(objects=>{window.__test.afterEdit(objects);window.__test.settle();window.__test.select()},affectedObjects);
+      await intervening.waitForTimeout(350);
+      assert.equal(await intervening.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),0,'every intervening edit payload cancels deferred global evidence');
+      await intervening.close();
+    }
+
+    for(const cancellation of ['failure','undo','suggestion','logout']){
+      const cancelled=await scenario();
+      await cancelled.evaluate(()=>{window.__test.edit();window.__test.save(1,{objectEvent:false,delayedClean:true})});
+      await cancelled.evaluate(reason=>{
+        if(reason==='failure')window.__test.fail();
+        else if(reason==='undo')window.__test.emit('wme-after-undo');
+        else if(reason==='suggestion')window.__test.mode('SUGGESTING');
+        else window.__test.emit('wme-logged-out');
+        window.__test.settle();
+      },cancellation);
+      await cancelled.waitForTimeout(350);
+      assert.equal(await cancelled.evaluate(async()=>(await window.__test.records()).filter(r=>r.kind==='saved').length),0,`${cancellation} cancels deferred confirmation`);
+      await cancelled.close();
+    }
 
     const remapped=await scenario();
     await remapped.evaluate(()=>{window.__test.add(-1);window.__test.remap(-1,501,true);window.__test.save(501)});await savedCount(remapped,1);

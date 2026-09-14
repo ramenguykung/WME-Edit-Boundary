@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Edited Boundary
 // @namespace    wme-edited-boundary
-// @version      1.0.3
+// @version      1.1.0
 // @description  Automatically outlines confirmed saved editing work, with local history and portable backups.
 // @author       Ramenguykung
 // @match        https://www.waze.com/editor*
@@ -13,6 +13,7 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @history      1.1.0 Fix the automatic saving issue regard save events transitions.
 // @history      1.0.3 Added support for border customization.
 // @history      1.0.2 Fix pending segments persist after undoing creation.
 // @history      1.0.1 Fix geometry validation failure where self-touching rings will produce the error in some tile settings.
@@ -859,6 +860,7 @@
     let workerGeneration=0;
     let renderTimer=0;
     let cacheTimer=0;
+    let saveRetryTimer=0;
     let historyLimit=100;
     /** @type {Polygon[]} */
     let outlines=[];
@@ -1084,6 +1086,15 @@
     /** Keys for absent unsaved creations already settled by undo. */
     const undoneMissingCreations=new Set();
 
+    /** @returns {boolean} */
+    function hasSaveEvidence(){return objectConfirmations.size>0||Boolean(recorder.successfulSave?.size);}
+    function cancelSaveRetry(){clearTimeout(saveRetryTimer);saveRetryTimer=0;}
+    function discardSaveEvidence(){cancelSaveRetry();objectConfirmations.clear();recorder.invalidateSuccessfulSave();}
+    function scheduleSaveRetry(){
+      if(saveRetryTimer||closed||!ready||!hasSaveEvidence())return;
+      saveRetryTimer=window.setTimeout(()=>{saveRetryTimer=0;reconcileSave();},250);
+    }
+
     /** Strip host metadata from the comparison without changing the host object. @param {Record<string,unknown>} raw */
     function fingerprint(raw) {
       const copy={...raw};
@@ -1138,7 +1149,7 @@
     /** @param {{affectedObjects:{objectType:string,objectId:string|number|null}[]}} event */
     function afterEdit(event){
       if(closed)return;
-      objectConfirmations.clear();
+      discardSaveEvidence();
       if(!ready){gap('Editing began before a clean baseline was available. This initial batch is excluded.');return;}
       if(sdk.Editing.getCurrentSaveMode()==='SUGGESTING'){gap('Suggestion work is observed separately and is not confirmed map editing.');return;}
       for(const affected of event.affectedObjects){
@@ -1191,7 +1202,7 @@
         if(c&&!final&&!c.snapshot.isDeleted&&!c.snapshot.geometry)gap(`${reader.type}: confirmed saved work has no established location.`);
         if(recorder.saved(event.dataModelName,id,final||undefined)&&final&&!final.isDeleted)cache.set(key,final);
       }
-      drawStatus();
+      scheduleSaveRetry();drawStatus();
     }
     function reconcileSave(){
       if(!ready||closed)return;
@@ -1204,6 +1215,7 @@
       }
       const confirmed=recorder.reconcileSuccessfulSave(cleanState(),(model,id)=>{const reader=byModel.get(model);return reader?snapshot(reader,id):null;},mainSaveModels);
       if(confirmed){console.debug('[Edited Boundary] successful save reconciled',confirmed);seedCache();}
+      if(hasSaveEvidence())scheduleSaveRetry();else cancelSaveRetry();
     }
 
     /** @param {Entry} r */
@@ -1388,7 +1400,7 @@
       for(const id of event.objectIds){const c=recorder.pending.get(recorder.key(event.dataModelName,id));if(c){const s=snapshot(reader,id);if(s){c.snapshot={...s,geometry:c.beforeGeometry||s.geometry||c.snapshot.geometry};recorder.publish(c);}}}
     }}));
     cleanups.push(sdk.Events.on({eventName:'wme-after-undo',eventHandler:()=>{
-      if(!ready)return;objectConfirmations.clear();recorder.undo();
+      if(!ready)return;discardSaveEvidence();recorder.undo();
       append(recorder.entry({model:'editor',objectType:'editor',objectId:'',geometry:null,isNew:false,isDeleted:false,fingerprint:'',locationSource:'unlocated'},'activity','undo','affected objects unavailable',null,null));
       for(const c of Array.from(recorder.pending.values())){
         const r=byModel.get(c.snapshot.model);if(!r)continue;
@@ -1402,13 +1414,13 @@
     cleanups.push(sdk.Events.on({eventName:'wme-no-edits',eventHandler:()=>{mayArm();reconcileSave();drawStatus();}}));
     cleanups.push(sdk.Events.on({eventName:'wme-save-finished',eventHandler:event=>{
       console.debug('[Edited Boundary] save finished',event.success,'pending',recorder.pending.size,'unsaved',sdk.Editing.getUnsavedChangesCount());
-      if(event.success){recorder.saveSucceeded();reconcileSave();}else{objectConfirmations.clear();recorder.saveFailed();gap('A save attempt failed. Unconfirmed changes remain pending.');}
+      if(event.success){recorder.saveSucceeded();reconcileSave();}else{discardSaveEvidence();recorder.saveFailed();gap('A save attempt failed. Unconfirmed changes remain pending.');}
       mayArm();drawStatus();
     }}));
     cleanups.push(sdk.Events.on({eventName:'wme-save-mode-changed',eventHandler:event=>{
-      if(event.saveMode!=='IDLE'){objectConfirmations.clear();recorder.invalidateSuccessfulSave();}
-      if(event.saveMode==='SUGGESTING'){if(recorder.pending.size)gap('Switching to suggestion mode left pending changes unconfirmed.');ready=false;recorder.setArmed(false);}else mayArm();drawStatus();
+      if(event.saveMode==='SUGGESTING'){discardSaveEvidence();if(recorder.pending.size)gap('Switching to suggestion mode left pending changes unconfirmed.');ready=false;recorder.setArmed(false);}else{mayArm();reconcileSave();}drawStatus();
     }}));
+    cleanups.push(sdk.Events.on({eventName:'wme-selection-changed',eventHandler:()=>{reconcileSave();drawStatus();}}));
     cleanups.push(sdk.Events.on({eventName:'wme-map-data-loaded',eventHandler:()=>{clearTimeout(cacheTimer);cacheTimer=window.setTimeout(()=>{if(ready){reconcileSave();seedCache();}else mayArm();},200);}}));
     cleanups.push(sdk.Events.on({eventName:'wme-map-move-end',eventHandler:drawStatus}));
     // Dedicated house-number events can preserve observed activity, but supply no parent segment.
@@ -1421,11 +1433,11 @@
     }
     /** @param {'logout'|'pagehide'} reason */
     function end(reason){
-      if(closed)return;closed=true;ready=false;objectConfirmations.clear();undoneMissingCreations.clear();session.endedAt=new Date().toISOString();session.status='ended';
+      if(closed)return;closed=true;ready=false;discardSaveEvidence();undoneMissingCreations.clear();session.endedAt=new Date().toISOString();session.status='ended';
       if(recorder.pending.size)session.gaps.push('Session ended with unconfirmed observations.');
       recorder.setArmed(false);queue(()=>store.put('sessions',[session]));cleanups.forEach(clean=>clean());
       for(const reader of readers)if(reader.model&&tracked.has(reader.model))try{sdk.Events.stopDataModelEventsTracking({dataModelName:reader.model});}catch{}
-      worker?.terminate();channel?.close();clearTimeout(renderTimer);clearTimeout(cacheTimer);drawStatus();
+      worker?.terminate();channel?.close();clearTimeout(renderTimer);clearTimeout(cacheTimer);cancelSaveRetry();drawStatus();
       if(reason==='logout')void sdk.Events.once({eventName:'wme-logged-in'}).then(async()=>{
         await writes;
         try{sdk.Sidebar.removeScriptTab();sdk.Map.removeLayer({layerName});}catch(error){console.debug('[Edited Boundary] Old UI cleanup',error);}

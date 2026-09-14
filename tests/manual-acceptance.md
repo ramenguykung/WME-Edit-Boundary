@@ -47,6 +47,7 @@ Live status: not yet verified for this version. Complete the steps above before 
 | Return both edit counters to zero | Tracking begins automatically. |
 | Pan, zoom, select, open an object or refresh loaded map data | No observed edit or saved footprint is created. |
 | Hide the boundary, edit and save, then show it | Tracking continues while the boundary is hidden. |
+| Select segments, hide or close the Edited Boundary panel, then edit and save | The affected objects become Saved without reopening the panel; no Pending outcome remains. |
 
 ## Save evidence and location
 
@@ -64,6 +65,8 @@ For each supported category, check addition, attribute change, movement where ap
 | Add and delete an object before saving | Observed activity may remain; no persisted addition or deletion footprint is invented. |
 | Save an addition, then delete and save the same object | Confirmed addition and deletion remain separate outcomes. |
 | Fail a save, then retry successfully | No early boundary or duplicate confirmed records appear. |
+| Save while edit counters clear after the save callbacks | Existing save evidence is retried and produces exactly one confirmed outcome, even if only selection or save-mode events follow. |
+| Select an object or reach a clean edit state without saving | Pending work remains unconfirmed. |
 | Save a new object whose temporary ID changes | The saved outcome retains continuous object identity. |
 | Delete a previously located object | Prior geometry is retained when object-specific deletion persistence is established. |
 | Delete an object with no recoverable geometry | The script reports an unlocated observation instead of using the cursor or viewport. |
